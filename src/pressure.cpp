@@ -19,7 +19,6 @@ MS_5803::MS_5803(uint32_t OSR, uint16_t address, uint8_t model) {
     _address = address;
     _model = model;
     _delay = 10;
-    Wire.begin();
 }
 
 bool MS_5803::begin() {

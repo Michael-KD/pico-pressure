@@ -1,132 +1,92 @@
 #include <Arduino.h>
 #include <Wire.h>
-#include "SparkFun_u-blox_GNSS_v3.h"
-#include <MicroNMEA.h>
-
 #include <pressure.h>
+#include <SD.h>
+
+#define DEBUG 1
+#define SD_CS 17
 
 uint32_t OSR = 256; // Set the oversampling rate, options: 256, 512, 1024, 2048, 4096
 uint16_t model = 1; // Set the model of the sensor, options: 1, 2
 uint8_t address = 0x76; // Set the I2C address of the sensor: 0x76, 0x77
 
-MS_5803 pressureSensor(OSR, address, model);
-SFE_UBLOX_GNSS myGNSS;
-
-char nmeaBuffer[100];
-MicroNMEA nmea(nmeaBuffer, sizeof(nmeaBuffer));
-
-
-
-
-unsigned long lastGPSReadTime = 0;
-unsigned long lastPressureReadTime = 0;
-long lastTime = 0;
-
 float pressure, temperature;
-
-struct GPSTimeData {
-    uint32_t epoch;
-    uint32_t micros;
-    bool timeFullyResolved;
-    bool timeValid;
-    bool confirmedTime;
-    uint8_t SIV;
-    uint32_t localTimer;
-};
-
-GPSTimeData getGPSTimeData(SFE_UBLOX_GNSS &myGNSS) {
-    GPSTimeData data;
-
-    // Get Unix Epoch and microseconds
-    data.epoch = myGNSS.getUnixEpoch(data.micros);
-
-    // Get time resolution and validity
-    data.timeFullyResolved = myGNSS.getTimeFullyResolved();
-    data.timeValid = myGNSS.getTimeValid();
-    data.confirmedTime = myGNSS.getConfirmedTime();
-
-    // Get the number of satellites in view (SIV)
-    data.SIV = myGNSS.getSIV();
-
-    // Get the local time
-    data.localTimer = millis();
-
-    return data;
-}
-
+unsigned long lastPressureReadTime = 0;
+MS_5803 pressureSensor(OSR, address, model);
 
 
 void setup() {
-    Serial.begin(115200);
-    while (!Serial) {
-        ; // Wait for serial port to connect.
+    if (DEBUG) {
+        Serial.begin(115200);
+        while (!Serial) {
+            ; // Wait for serial port to connect.
+        }
+        delay(1000);
+        Serial.println("Serial connected.");
     }
-
     Wire.begin();
 
     // Initialize pressure sensor
     if (!pressureSensor.begin()) {
+        if (DEBUG)
         Serial.println("Failed to initialize MS5803 sensor!");
         while (1) ; // Halt execution
     }
+    if (DEBUG)
     Serial.println("MS5803 sensor initialized successfully.");
 
-    // Initialize GNSS module
-    if (myGNSS.begin() == false) {
-        Serial.println(F("u-blox GNSS module not detected at default I2C address. Please check wiring. Freezing."));
-        while (1);
+    // Initialize SD card
+    if (!SD.begin(SD_CS)) {
+        if (DEBUG)
+        Serial.println("Failed to initialize SD card!");
+        while (1) ; // Halt execution
     }
+    if (DEBUG)
+    Serial.println("SD card initialized successfully.");
 
-    myGNSS.setI2COutput(COM_TYPE_UBX | COM_TYPE_NMEA); //Set the I2C port to output both NMEA and UBX messages
-    myGNSS.saveConfigSelective(VAL_CFG_SUBSEC_IOPORT); //Save (only) the communications port settings to flash and BBR
+    String filename = "datalog" + String(millis()) + ".txt";
+    const char *filename_cstr = filename.c_str();
 
-    myGNSS.setProcessNMEAMask(SFE_UBLOX_FILTER_NMEA_ALL); // Make sure the library is passing all NMEA messages to processNMEA
-
-    // myGNSS.setProcessNMEAMask(SFE_UBLOX_FILTER_NMEA_GGA); // Or, we can be kind to MicroNMEA and _only_ pass the GGA messages to it
-    myGNSS.setNMEAOutputPort(Serial);
+    // write header
+    File dataFile = SD.open(filename_cstr, FILE_WRITE);
+    if (dataFile) {
+        dataFile.println("Pressure, Temperature");
+        dataFile.close();
+    } else {
+        if (DEBUG)
+        Serial.println("Error opening datalog.txt");
+    }    
 }
+
 
 void loop() {
     unsigned long currentTime = millis();
-
-    // if (currentTime - lastGPSReadTime >= 10000) {
-    //     myGNSS.checkUblox(); //See if new data is available. Process bytes as they come in.
-    //     Serial.println("Checking GNSS");
-    //     if(nmea.isValid() == true) {
-    //         long latitude_mdeg = nmea.getLatitude();
-    //         long longitude_mdeg = nmea.getLongitude();
-
-    //         Serial.print("Latitude (deg): ");
-    //         Serial.println(latitude_mdeg / 1000000., 6);
-    //         Serial.print("Longitude (deg): ");
-    //         Serial.println(longitude_mdeg / 1000000., 6);
-
-    //         nmea.clear(); // Clear the MicroNMEA storage to make sure we are getting fresh data
-    //     }
-        
-
-
-
-    //     lastGPSReadTime = currentTime;
-    // }
-
 
     if (currentTime - lastPressureReadTime >= 30) {
         pressureSensor.readSensor();
 
         pressure = pressureSensor.getPressure();
         temperature = pressureSensor.getTemp();
-        // Serial.print("Pressure: ");
-        // Serial.print(pressure, 2);
-        // Serial.print(" mbar, Temperature: ");
-        // Serial.print(temperature, 2);
-        // Serial.println(" C");
 
-        // teleplot data
-        Serial.print(">pressure:");
-        Serial.println(pressure);
-        Serial.print(">temperature:");
-        Serial.println(temperature);
+        // teleplot
+        if (DEBUG) {
+            Serial.print(">pressure:");
+            Serial.println(pressure);
+            Serial.print(">temperature:");
+            Serial.println(temperature);
+        }
+
+        // sd card logging
+        File dataFile = SD.open("datalog.txt", FILE_WRITE);
+        if (dataFile) {
+            dataFile.print(pressure);
+            dataFile.print(",");
+            dataFile.println(temperature);
+            dataFile.close();
+        } else {
+            if (DEBUG)
+            Serial.println("Error opening datalog.txt");
+        }
 
 
         lastPressureReadTime = currentTime;
