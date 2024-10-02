@@ -1,6 +1,7 @@
 # Setup steps for now:
 - format sd card to fat32
     - still need to test file sizes/limit
+    - try exFat library?
     - Downloads\guiformat-x64\guiformat-x64.exe
 
 - to get pico uploading working
