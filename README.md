@@ -9,3 +9,4 @@
     - WinUSB drivers for the "RP2 Boot2 (Interface 1)" device
 
 - check final current used by the pico
+- clock speed of pico, check frequency read

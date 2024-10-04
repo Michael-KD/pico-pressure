@@ -23,9 +23,12 @@ MS_5803::MS_5803(uint32_t OSR, uint16_t address, uint8_t model) {
 
 bool MS_5803::begin() {
     Wire.beginTransmission(_address);
-    if (Wire.endTransmission() != 0) {
-        return false;  // Sensor not found
-    }
+    Serial.println("begin");
+    Serial.println(Wire.endTransmission());
+    // if (Wire.endTransmission() != 0) {
+    //     Serial.println("Sensor not found");
+    //     return false;  // Sensor not found
+    // }
     calibrate();
     return true;
 }
