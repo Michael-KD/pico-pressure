@@ -56,14 +56,12 @@ def save_data_to_json(frequency, size_per_line, notes, current, clock_speed):
         json.dump(existing_data, json_file, indent=4)
 
 if __name__ == "__main__":
-    file_path = 'D:\\TEST2.TXT'
+    file_path = 'D:\\TEST4.CSV'
     frequency = calculate_frequency(file_path)
     size_per_line = calculate_file_size_per_line(file_path)
     
-    notes = input("Enter any general notes: ")
-    current = input("Enter the current: ")
-    clock_speed = input("Enter the clock speed: ")
-
-    save_data_to_json(frequency, size_per_line, notes, current, clock_speed)
+    # save_data_to_json(frequency, size_per_line, notes, current, clock_speed)
     print(f"Frequency of sensor readings: {frequency} Hz")
     print(f"File size per line: {size_per_line} bytes")
+    print(f"num lines for 4gb file: {4 * 1024 * 1024 * 1024 / size_per_line}")
+    print(f"num hours to fill 4gb file: {4 * 1024 * 1024 * 1024 / size_per_line / frequency / 3600}")

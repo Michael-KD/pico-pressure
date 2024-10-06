@@ -1,17 +1,23 @@
 #include <Arduino.h>
 #include <Wire.h>
-// #include <pressure .h>
 #include <SD.h>
+#include <SPI.h>
 
-#define DEBUG 1
+#define DEBUG 0
 #define SD_CS 17
+#define SIZE 50
+#define OSR 512 // Set the oversampling rate, options: 256, 512, 1024, 2048, 4096
 
+unsigned long currentTime;
 float pressure, temperature;
-unsigned long lastPressureReadTime = 0;
 
 #include <MS5803_01.h> 
-const int osr = 256; // Set the oversampling rate, options: 256, 512, 1024, 2048, 4096
-MS_5803 sensor = MS_5803(osr);
+MS_5803 sensor = MS_5803(OSR);
+int32_t pressureArray[SIZE];
+int32_t temperatureArray[SIZE];
+int arrayIndex = 0;
+unsigned long lastLogTime = 0;
+unsigned long timeArray[SIZE];
 
 String filename;
 
@@ -53,7 +59,7 @@ void setup() {
 
     // Check if file exists and increment filename if necessary
     String baseFilename = "test";
-    String extension = ".txt";
+    String extension = ".csv";
     filename = baseFilename + extension;
     int fileIndex = 1;
 
@@ -65,7 +71,7 @@ void setup() {
     // write header
     File dataFile = SD.open(filename.c_str(), FILE_WRITE);
     if (dataFile) {
-        dataFile.println("Time, Pressure, Temperature");
+        dataFile.println("Time,Pressure,Temp");
         dataFile.close();
     } else {
         if (DEBUG)
@@ -80,6 +86,7 @@ void loop() {
     // if (currentTime - lastPressureReadTime >= 5) {
         sensor.readSensor();
         
+        currentTime = millis();
         pressure = sensor.pressure();
         temperature = sensor.temperature();
         
@@ -91,20 +98,31 @@ void loop() {
             Serial.println(temperature);
         }
 
-        // sd card logging
-        File dataFile = SD.open(filename.c_str(), FILE_WRITE);
-        if (dataFile) {
-            dataFile.print(millis());
-            dataFile.print(",");
-            dataFile.print(pressure);
-            dataFile.print(",");
-            dataFile.println(temperature);
-            dataFile.close();
-        } else {
-            if (DEBUG)
-            Serial.println("Error logging to datalog");
+        if (arrayIndex == SIZE) {
+            arrayIndex = 0;
+            //log
+            File dataFile = SD.open(filename.c_str(), FILE_WRITE);
+            if (dataFile) {
+                for (int i = 0; i < 50; i++) {
+                    dataFile.print(timeArray[i]);
+                    dataFile.print(",");
+                    dataFile.print(pressureArray[i]);
+                    dataFile.print(",");
+                    dataFile.println(temperatureArray[i]);
+                }
+                dataFile.close();
+            } else {
+                if (DEBUG)
+                Serial.println("Error logging to datalog");
+            }
         }
 
+        timeArray[arrayIndex] = currentTime - lastLogTime;
+        pressureArray[arrayIndex] = (int32_t) round(pressure * 100);
+        temperatureArray[arrayIndex] = (int32_t) round(temperature * 100);
+        arrayIndex++;
+
+        lastLogTime = currentTime;
 
         // lastPressureReadTime = currentTime;
     // }
