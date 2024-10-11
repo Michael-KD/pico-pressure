@@ -2,6 +2,7 @@ import csv
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.patches import Rectangle
+import os
 
 # Function to convert milliseconds to hours
 def ms_to_hours(ms):
@@ -10,12 +11,15 @@ def ms_to_hours(ms):
 # Ask for file size input
 file_size_kb = float(input("Enter the file size in KB: "))
 
+# Ask for input file name
+input_file = input("Enter the input CSV file name: ")
+
 # Read the CSV file
 times, pressures, temperatures = [], [], []
 cumulative_time = 0
 time_diffs = []
 
-with open('D:\TEST2.CSV', 'r') as file:
+with open(input_file, 'r') as file:
     csv_reader = csv.reader(file)
     next(csv_reader)  # Skip the header row
     first_row = True
@@ -101,6 +105,9 @@ ax_text.add_patch(rect)
 plt.tight_layout()
 plt.subplots_adjust(right=0.7)  # Make room for the text box
 
+# Generate output file name based on input file name
+output_file = f"pressure_temperature_plot_{os.path.splitext(input_file)[0]}.png"
+
 # Save the plot as a PNG file
-plt.savefig('pressure_temperature_plot.png', dpi=300, bbox_inches='tight')
-print("Plot saved as 'pressure_temperature_plot.png'")
+plt.savefig(output_file, dpi=300, bbox_inches='tight')
+print(f"Plot saved as '{output_file}'")

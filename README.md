@@ -10,3 +10,10 @@
 
 - check final current used by the pico
 - clock speed of pico, check frequency read
+- try binary log files
+
+
+1091mAh for ~26 hours
+2:54 to 4:41
+1:47 hours
+58mAh in 1:47 hours = 34.3mA

@@ -38,7 +38,7 @@ public:
 	// The argument is the desired oversampling resolution, which has 
 	// values of 256, 512, 1024, 2048, 4096
 	// Second argument is the I2C address of the unit: either 0x76 or 0x77
-    MS_5803(uint16_t Resolution = 512, uint8_t address = 0x76);
+    MS_5803(uint16_t Resolution = 512, uint8_t address = 0x76, uint8_t SensorNumber = 1);
     // Initialize the sensor 
     boolean initializeMS_5803(boolean Verbose = true);
     // Reset the sensor
@@ -88,6 +88,7 @@ private:
     uint16_t _Resolution;
     unsigned int sensorCoeffs[8]; //Coefficients
     uint8_t _address; // I2C Address
+    uint8_t _SensorNumber; // Sensor number
 };
 
 #endif 

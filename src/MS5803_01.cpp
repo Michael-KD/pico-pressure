@@ -72,11 +72,13 @@ const uint64_t POW_2_37 = 137438953472ULL; // 2^37 = 137438953472
 
 //-------------------------------------------------
 // Constructor
-MS_5803::MS_5803(uint16_t Resolution, uint8_t Address) {
+MS_5803::MS_5803(uint16_t Resolution, uint8_t Address, uint8_t SensorNumber) {
 	// The argument is the oversampling resolution, which may have values
 	// of 256, 512, 1024, 2048, or 4096.
 	_Resolution = Resolution;
 	_address = Address;
+    _SensorNumber = SensorNumber;
+
 }
 
 //-------------------------------------------------
@@ -182,58 +184,52 @@ void MS_5803::readSensor() {
     // Do 2nd order temperature compensation (see pg 9 of MS5803 data sheet)
     // I have tried to insert the fixed values wherever possible
     // (i.e. 2^31 is hard coded as 2147483648).
+    // Do 2nd order temperature compensation
+
     if (TEMP < 2000) {
-		// For 1 bar model
-		// T2 = ((int64_t)dT * dT) / 2147483648ULL ; // 2^31 = 2147483648
-		// T2 = (int32_t)T2; // recast as signed 32bit integer
-		// OFF2 = 3 * ((TEMP-2000) * (TEMP-2000));
-		// Sens2 = 7 * ((TEMP-2000)*(TEMP-2000)) / 8 ;
-        // For 2 bar model
-		T2 = ((int64_t)dT * dT) / 2147483648LL ; // 2^31 = 2147483648
-		T2 = (int32_t)T2; // recast as signed 32bit integer
-		OFF2 = (61 * ((TEMP-2000) * (TEMP-2000))) / 16 ;
-		Sens2 = 2 * ((TEMP-2000) * (TEMP-2000)) ;
-
-        // For 30 bar model
-        // T2 = 3 * ((int64_t)dT * dT) / POW_2_33 ;
-		// T2 = (int32_t)T2; // recast as signed 32bit integer
-		// OFF2 = 3 * ((TEMP-2000) * (TEMP-2000)) / 2 ;
-		// Sens2 = 5 * ((TEMP-2000) * (TEMP-2000)) / 8 ;	
-
-    } else { // if TEMP is > 2000 (20.0C)
-    	// For 1 bar model
-		// T2 = 0;
-		// OFF2 = 0;
-		// Sens2 = 0;
-		// if (TEMP > 4500) {
-		// 	// Extra adjustment for high temps, only needed for 1 bar model
-		// 	Sens2 = Sens2 - ((TEMP-4500)*(TEMP-4500)) / 8;
-		// }
-		// For 2 bar model
-		T2 = 0;
-		OFF2 = 0;
-		Sens2 = 0;
-
-        // For 30 bar model
-        // T2 = 7 * ((int64_t)dT * dT) / POW_2_37;
-		// T2 = (int32_t)T2; // recast as signed 32bit integer
-		// OFF2 = 1 * ((TEMP-2000) * (TEMP-2000)) / 16;
-		// Sens2 = 0;
+        if (_SensorNumber == 1) {
+            T2 = ((int64_t)dT * dT) / 2147483648ULL;
+            T2 = (int32_t)T2;
+            OFF2 = 3 * ((TEMP-2000) * (TEMP-2000));
+            Sens2 = 7 * ((TEMP-2000)*(TEMP-2000)) / 8;
+        } else if (_SensorNumber == 2) {
+            T2 = ((int64_t)dT * dT) / 2147483648LL;
+            T2 = (int32_t)T2;
+            OFF2 = (61 * ((TEMP-2000) * (TEMP-2000))) / 16;
+            Sens2 = 2 * ((TEMP-2000) * (TEMP-2000));
+        } else if (_SensorNumber == 30) {
+            T2 = 3 * ((int64_t)dT * dT) / POW_2_33;
+            T2 = (int32_t)T2;
+            OFF2 = 3 * ((TEMP-2000) * (TEMP-2000)) / 2;
+            Sens2 = 5 * ((TEMP-2000) * (TEMP-2000)) / 8;
+        }
+    } else {
+        if (_SensorNumber == 1 || _SensorNumber == 2) {
+            T2 = 0;
+            OFF2 = 0;
+            Sens2 = 0;
+            if (_SensorNumber == 1 && TEMP > 4500) {
+                Sens2 = Sens2 - ((TEMP-4500)*(TEMP-4500)) / 8;
+            }
+        } else if (_SensorNumber == 30) {
+            T2 = 7 * ((int64_t)dT * dT) / POW_2_37;
+            T2 = (int32_t)T2;
+            OFF2 = 1 * ((TEMP-2000) * (TEMP-2000)) / 16;
+            Sens2 = 0;
+        }
     }
 
     // Additional compensation for very low temperatures (< -15C)
     if (TEMP < -1500) {
-		// For 1 bar model
-		// Leave OFF2 alone in this case
-		// Sens2 = Sens2 + 2 * ((TEMP+1500)*(TEMP+1500));
-        // For 2 bar model
-		OFF2 = OFF2 + 20 * ((TEMP+1500)*(TEMP+1500));
-		Sens2 = Sens2 + 12 * ((TEMP+1500)*(TEMP+1500));
-
-        // For 30 bar model
-        // OFF2 = OFF2 + 7 * ((TEMP+1500)*(TEMP+1500));
-		// Sens2 = Sens2 + 4 * ((TEMP+1500)*(TEMP+1500));	
-
+        if (_SensorNumber == 1) {
+            Sens2 = Sens2 + 2 * ((TEMP+1500)*(TEMP+1500));
+        } else if (_SensorNumber == 2) {
+            OFF2 = OFF2 + 20 * ((TEMP+1500)*(TEMP+1500));
+            Sens2 = Sens2 + 12 * ((TEMP+1500)*(TEMP+1500));
+        } else if (_SensorNumber == 30) {
+            OFF2 = OFF2 + 7 * ((TEMP+1500)*(TEMP+1500));
+            Sens2 = Sens2 + 4 * ((TEMP+1500)*(TEMP+1500));
+        }
     }
 
     // Calculate initial Offset and Sensitivity
@@ -241,18 +237,17 @@ void MS_5803::readSensor() {
     // multiplication operations don't overflow the original 16 bit and 32 bit
     // integers
 
-	// For 1 bar sensor
-	// Offset = (int64_t)sensorCoeffs[2] * 65536 + (sensorCoeffs[4] * (int64_t)dT) / 128;
-	// Sensitivity = (int64_t)sensorCoeffs[1] * 32768 + (sensorCoeffs[3] * (int64_t)dT) / 256;
-	// For 2 bar sensor
-	Offset = (int64_t)sensorCoeffs[2] * 131072 + (sensorCoeffs[4] * (int64_t)dT) / 64;
-	Sensitivity = (int64_t)sensorCoeffs[1] * 65536 + (sensorCoeffs[3] * (int64_t)dT) / 128;
-
-    //  For 30 bar sensor
-    // Offset = (int64_t)sensorCoeffs[2] * 65536 + (sensorCoeffs[4] * (int64_t)dT) / 128;
-	// Sensitivity = (int64_t)sensorCoeffs[1] * 32768 + (sensorCoeffs[3] * (int64_t)dT) / 256;
-
-
+    // Calculate initial Offset and Sensitivity
+    if (_SensorNumber == 1) {
+        Offset = (int64_t)sensorCoeffs[2] * 65536 + (sensorCoeffs[4] * (int64_t)dT) / 128;
+        Sensitivity = (int64_t)sensorCoeffs[1] * 32768 + (sensorCoeffs[3] * (int64_t)dT) / 256;
+    } else if (_SensorNumber == 2) {
+        Offset = (int64_t)sensorCoeffs[2] * 131072 + (sensorCoeffs[4] * (int64_t)dT) / 64;
+        Sensitivity = (int64_t)sensorCoeffs[1] * 65536 + (sensorCoeffs[3] * (int64_t)dT) / 128;
+    } else if (_SensorNumber == 30) {
+        Offset = (int64_t)sensorCoeffs[2] * 65536 + (sensorCoeffs[4] * (int64_t)dT) / 128;
+        Sensitivity = (int64_t)sensorCoeffs[1] * 32768 + (sensorCoeffs[3] * (int64_t)dT) / 256;
+    }
 
     // Adjust TEMP, Offset, Sensitivity values based on the 2nd order
     // temperature correction above.
@@ -260,21 +255,14 @@ void MS_5803::readSensor() {
     Offset = Offset - OFF2; // both should be int64_t
     Sensitivity = Sensitivity - Sens2; // both should be int64_t
 
-    // Final compensated pressure calculation. We first calculate the pressure
-    // as a signed 32-bit integer (mbarInt), then convert that value to a
-    // float (mbar).
-
-	// For 1 bar sensor
-	// mbarInt = ((D1 * Sensitivity) / 2097152 - Offset) / 32768;
-	// mbar = (float)mbarInt / 100;
-	// For 2 bar sensor
-	mbarInt = ((D1 * Sensitivity) / 2097152 - Offset) / 32768;
-	mbar = (float)mbarInt / 100;    
-
-    // For 30 bar sensor
-    // mbarInt = ((D1 * Sensitivity) / 2097152 - Offset) / 8192;
-	// mbar = (float)mbarInt / 10;
-
+    // Final compensated pressure calculation
+    if (_SensorNumber == 1 || _SensorNumber == 2) {
+        mbarInt = ((D1 * Sensitivity) / 2097152 - Offset) / 32768;
+        mbar = (float)mbarInt / 100;
+    } else if (_SensorNumber == 30) {
+        mbarInt = ((D1 * Sensitivity) / 2097152 - Offset) / 8192;
+        mbar = (float)mbarInt / 10;
+    }
 
 	// Calculate the human-readable temperature in Celsius
 	tempC  = (float)TEMP / 100;
