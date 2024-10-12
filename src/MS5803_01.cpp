@@ -337,7 +337,8 @@ unsigned long MS_5803::MS_5803_ADC(char commandADC) {
             delay(1); // 1 ms
             break;
         case CMD_ADC_512 :
-            delay(2.5); // 3 ms
+            delay(2); // 3
+            // delayMicroseconds(1500);
             break;
         case CMD_ADC_1024:
             delay(4);

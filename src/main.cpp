@@ -3,10 +3,10 @@
 #include <SD.h>
 #include <SPI.h>
 
-#define DEBUG 1
-#define LOGGING 0
+#define DEBUG 0
+#define LOGGING 1
 #define SD_CS 17
-#define SIZE 100 // Number of entries to log before writing to SD card
+#define SIZE 300 // Number of entries to log before writing to SD card
 #define OSR 512 // Set the oversampling rate, options: 256, 512, 1024, 2048, 4096
 #define FILE_DURATION 28800000 // 8 hours in milliseconds
 
@@ -14,7 +14,7 @@ unsigned long currentTime;
 float pressure, temperature;
 
 #include <MS5803_01.h> 
-MS_5803 sensor = MS_5803(OSR, 0x76, 1);
+MS_5803 sensor = MS_5803(OSR, 0x76, 30);
 
 String filename;
 String baseFilename = "data";
@@ -43,7 +43,7 @@ String findAvailableFilename() {
 }
 
 void createNewFile() {
-    fileCreationTime = millis();
+    fileCreationTime = micros();
     if (fileIterator > 'z' || !SD.exists(filename.c_str())) {
         fileIterator = 'a';
         baseFilename = findAvailableFilename();
@@ -103,7 +103,7 @@ void setup() {
 void loop() {
     sensor.readSensor();
     
-    currentTime = millis();
+    currentTime = micros();
     pressure = sensor.pressure();
     temperature = sensor.temperature();
     
@@ -117,7 +117,7 @@ void loop() {
     if (LOGGING) {
     
         logBuffer[bufferIndex] = {
-            static_cast<uint32_t>(currentTime - lastLogTime),
+            static_cast<uint32_t>((currentTime - lastLogTime) / 10), // Convert to 10s of microseconds and store as int
             static_cast<int32_t>(round(pressure * 100)),
             static_cast<int32_t>(round(temperature * 100))
         };
@@ -145,7 +145,8 @@ void loop() {
         lastLogTime = currentTime;
 
         // Check if it's time to create a new file
-        if (currentTime - fileCreationTime >= FILE_DURATION) {
+        if (currentTime - fileCreationTime >= FILE_DURATION * 1000UL) // Convert milliseconds to microseconds
+        {
             createNewFile();
         }
     }
