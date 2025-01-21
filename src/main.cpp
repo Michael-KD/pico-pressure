@@ -115,7 +115,6 @@ void loop() {
     }
 
     if (LOGGING) {
-    
         logBuffer[bufferIndex] = {
             static_cast<uint32_t>((currentTime - lastLogTime) / 10), // Convert to 10s of microseconds and store as int
             static_cast<int32_t>(round(pressure * 100)),
