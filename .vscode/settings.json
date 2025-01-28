@@ -13,6 +13,12 @@
         "vector": "cpp",
         "string_view": "cpp",
         "initializer_list": "cpp",
-        "cmath": "cpp"
+        "cmath": "cpp",
+        "*.tcc": "cpp",
+        "bitset": "cpp",
+        "istream": "cpp",
+        "regex": "cpp",
+        "typeinfo": "cpp",
+        "span": "cpp"
     }
 }

@@ -1,0 +1,8 @@
+{
+    "name": "RYLR998",
+    "version": "1.0.0",
+    "description": "LoRa library for RYLR998 modules",
+    "keywords": "lora, communication",
+    "frameworks": "arduino",
+    "platforms": "*"
+  }

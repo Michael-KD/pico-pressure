@@ -17,3 +17,22 @@
 2:54 to 4:41
 1:47 hours
 58mAh in 1:47 hours = 34.3mA
+
+
+# mark 2
+- gps
+    - GT-U7
+    - MAX-M10S
+- rtc
+    - DS3231M
+- lora (maybe)
+    - RYLR998
+    - serial
+- rp2040 vs rp2350?
+- dual core
+    - one for pressure sensor
+    - one for everything else
+    - look into DMA
+- 2 i2c buses
+    - one for pressure sensor
+    - one for rtc, gps, etc?
