@@ -1,59 +1,71 @@
-// #include <Arduino.h>
-// #include <Wire.h>
-// // #include <SD.h>
-// #include <SPI.h>
-
 #include <Arduino.h>
-#include <RYLR998.h>
+#include <Wire.h>
+#include <RTClib.h>
+#include <SPI.h>
+#include "pico/multicore.h"
 
-#define LORA_BAUD_RATE 115200
-#define LORA_SERIAL Serial2 // Adjust this as needed for your setup
+RTC_DS3231 rtc;
 
-LoRa lora(LORA_SERIAL, 2000); // Create a LoRa object with a 2-second timeout
 
-void onReceive(uint16_t address, const String& data, int rssi, int snr) {
-    Serial.print("Received data from address ");
-    Serial.print(address);
-    Serial.print(": ");
-    Serial.println(data);
-    Serial.print("RSSI: ");
-    Serial.print(rssi);
-    Serial.print(" SNR: ");
-    Serial.println(snr);
-}
+const char* daysOfTheWeek[] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
 
 void setup() {
-    Serial.begin(115200); // Initialize serial monitor
-    while (!Serial); // Wait for serial monitor to open
-    delay(1000); // Stabilize the serial monitor
+  Serial.begin(115200);
+  while (!Serial);
+  delay(100);
+  Serial.println("RTC test");
 
-    Serial.println("Starting LoRa module setup...");
 
-    lora.setDebug(true); // Enable debug prints
-    lora.begin(LORA_BAUD_RATE); // Initialize LoRa module serial
-    delay(1000);
+  Wire.begin();
+  rtc.begin();
 
-    lora.send("AT");
-    lora.waitForResponse();
-    
-    lora.send("AT");
-    lora.waitForResponse();
-    
+  if (!rtc.begin()) {
+    Serial.println("Couldn't find RTC");
+    while (1);
+  }
 
-    // Set network ID and frequency
-    lora.send("AT+FACTORY"); // Reset to factory settings
-    lora.waitForResponse();
-    lora.send("AT+NETWORKID=6");
-    lora.waitForResponse();
-    lora.send("AT+ADDRESS=1"); // Set address to 1
-    lora.waitForResponse();
-    lora.setReceiveCallback(onReceive); // Set the receive callback
+  if (rtc.lostPower()) {
+    Serial.println("RTC lost power, let's set the time!");
+    // The following line sets the RTC to the date & time this sketch was compiled
+    rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+    // Alternatively, you can set the RTC with an explicit date & time
+    // rtc.adjust(DateTime(2023, 10, 5, 12, 0, 0));
+  }
 
-    lora.queryVersion();
-
-    Serial.println("LoRa module setup complete.");
 }
 
-void loop() {
-    lora.waitForResponse(2000);
+void loop () {
+    DateTime now = rtc.now();
+    
+    Serial.print(now.year(), DEC);
+    Serial.print('/');
+    Serial.print(now.month(), DEC);
+    Serial.print('/');
+    Serial.print(now.day(), DEC);
+    Serial.print(" (");
+    Serial.print(daysOfTheWeek[now.dayOfTheWeek()]);
+    Serial.print(") ");
+    Serial.print(now.hour(), DEC);
+    Serial.print(':');
+    Serial.print(now.minute(), DEC);
+    Serial.print(':');
+    Serial.print(now.second(), DEC);
+    Serial.println();
+    
+    delay(1000);
+}
+
+
+
+void setup1() {
+  pinMode(LED_BUILTIN, OUTPUT);
+  Serial.begin(115200);
+}
+
+void loop1() {
+  Serial.println("Hello from core 1!");
+  digitalWrite(LED_BUILTIN, HIGH);
+  delay(500);
+  digitalWrite(LED_BUILTIN, LOW);
+  delay(500);
 }

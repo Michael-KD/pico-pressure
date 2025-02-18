@@ -1,0 +1,116 @@
+// // #include <Arduino.h>
+// // #include <Wire.h>
+// // // #include <SD.h>
+// // #include <SPI.h>
+
+// #include <Arduino.h>
+// #include <RYLR998.h>
+
+// #define LORA_BAUD_RATE 115200
+// #define LORA_SERIAL Serial2 // Adjust this as needed for your setup
+
+// LoRa lora(LORA_SERIAL, 2000); // Create a LoRa object with a 2-second timeout
+
+// void onReceive(uint16_t address, const String& data, int rssi, int snr) {
+//     Serial.print("Received data from address ");
+//     Serial.print(address);
+//     Serial.print(": ");
+//     Serial.println(data);
+//     Serial.print("RSSI: ");
+//     Serial.print(rssi);
+//     Serial.print(" SNR: ");
+//     Serial.println(snr);
+// }
+
+// void setup() {
+//     Serial.begin(115200); // Initialize serial monitor
+//     while (!Serial); // Wait for serial monitor to open
+//     delay(1000); // Stabilize the serial monitor
+
+//     Serial.println("Starting LoRa module setup...");
+
+//     lora.setDebug(true); // Enable debug prints
+//     lora.begin(LORA_BAUD_RATE); // Initialize LoRa module serial
+//     delay(1000);
+
+//     lora.send("AT");
+//     lora.waitForResponse();
+//     lora.send("AT");
+//     lora.waitForResponse();
+
+//     // Reset to factory settings
+//     lora.send("AT+FACTORY");
+//     lora.waitForResponse();
+
+//     // // Set network ID and frequency
+//     // lora.send("AT+NETWORKID=6");
+//     // lora.waitForResponse();
+//     // lora.send("AT+BAND=915000000"); // Set frequency to 915 MHz
+//     // lora.waitForResponse();
+
+//     // // Set device address
+//     // lora.send("AT+ADDRESS=2"); // Set address to 2
+//     // lora.waitForResponse();
+
+//     // lora.setReceiveCallback(onReceive); // Set the receive callback
+
+//     // lora.queryVersion();
+
+//     Serial.println("LoRa module setup complete.");
+// }
+
+// void loop() {
+//   // receive data from the sender
+//     if (LORA_SERIAL.available()) {
+//         String response = LORA_SERIAL.readString();
+//         Serial.println("Received: " + response);        
+//     }
+// }
+
+#include <Arduino.h>
+
+#define RST_PIN 4
+
+bool sendATCommand(String command) {
+  Serial2.println(command);
+  delay(100);
+  auto response = Serial2.readString();
+  Serial.println("Sent: " + command);
+  Serial.println("Received: " + response);
+  return response.startsWith("+OK");
+}
+
+void setup() {
+  while (!Serial) {
+    ;
+  }
+  
+  Serial.begin(115200); // Serial monitor
+  Serial2.begin(115200);  // Serial communication with Reyax 998
+
+  pinMode(RST_PIN, OUTPUT);
+  digitalWrite(RST_PIN, HIGH);
+
+  // Reset the Reyax 998 module
+  digitalWrite(RST_PIN, LOW);
+  delay(100);
+  digitalWrite(RST_PIN, HIGH);
+  delay(100);
+
+  Serial.println("Reset complete");
+
+  // Send initialization commands to Reyax 998
+  sendATCommand("AT+MODE=0");  
+  sendATCommand("AT+ADDRESS=1");
+}
+
+void loop() {
+  if (Serial2.available()) {
+    String response = Serial2.readString();
+    Serial.println("Received: " + response);
+  }
+
+  // Example command to send data
+  sendATCommand("AT+SEND=2,5,HELLO");
+  delay(2000);
+}

@@ -37,6 +37,7 @@ String LoRa::waitForResponse(unsigned long waitTime) {
                 Serial.println(response);
             }
             if (response.startsWith("+RCV=")) {
+                Serial.println("Received data from LoRa module.");
                 // Parse the +RCV command
                 int addressEnd = response.indexOf(',', 5);
                 int lengthEnd = response.indexOf(',', addressEnd + 1);

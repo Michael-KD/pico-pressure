@@ -26,7 +26,7 @@
 - rtc
     - DS3231M
 - lora (maybe)
-    - RYLR998
+    - RYLR998, think theyre broken? order more?
     - serial
 - rp2040 vs rp2350?
 - dual core
