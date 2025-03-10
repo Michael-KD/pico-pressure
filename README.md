@@ -19,7 +19,7 @@
 58mAh in 1:47 hours = 34.3mA
 
 
-# mark 2
+# Mk II
 - gps
     - GT-U7
     - MAX-M10S
