@@ -18,27 +18,4 @@ void loop() {
   Serial.println("Hello World!");
   delay(1000);
 
-  // SD Card test
-
-
-  // UART header test
-
-
-  // GPS test
-
-
-  // RTC test
-
-  // Wtatchdog test
-
-
-  // 
-
-
-  // Pressure sensor test
-
-
-  // Dual core test
-
-
 }
