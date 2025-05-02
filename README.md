@@ -5,6 +5,7 @@ Pico pressure V2.0 Testing
     - CS pin 17
     - Format to exFAT
     - works with SD_SCK_MHZ(50)
+    - still need to test reading and writing files and speeds
 
 
 - Switch tests
