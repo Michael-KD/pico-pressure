@@ -5,7 +5,6 @@
 
 
 
-
 void setup() {
   Serial.begin(115200);
   while (!Serial);
@@ -15,6 +14,7 @@ void setup() {
 }
 
 void loop() {
+  Wire1.begin();
   Serial.println("Hello World!");
   delay(1000);
 

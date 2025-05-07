@@ -1,0 +1,8 @@
+{
+    "files.associations": {
+        "*.page-template": "vue",
+        "*.layout-template": "vue",
+        "*.vue": "vue",
+        "mstd_iterator": "cpp"
+    }
+}
