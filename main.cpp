@@ -11,6 +11,7 @@ void setup() {
   delay(1000);
 
   Serial.println("Serial monitor opened!");
+  Wire1.begin();
 }
 
 void loop() {
