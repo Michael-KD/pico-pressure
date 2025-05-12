@@ -68,6 +68,8 @@
 
 - Pressure sensor test
     - try I2C and SPI
+    - use current library?
+    - try new one, use 3 separate files vs 1
 
 - Dual core test
     - core 0 and core 1
