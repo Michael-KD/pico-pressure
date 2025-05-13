@@ -1,3 +1,4 @@
+// CS Pin 17
 // Quick hardware test for SPI card access.
 //
 #include <SPI.h>

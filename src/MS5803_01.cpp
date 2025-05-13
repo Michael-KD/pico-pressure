@@ -3,24 +3,8 @@
  * 	of pressure sensors. This library uses I2C to communicate with the
  * 	MS5803 using the Wire library from Arduino.
  *
- *	This library only works with the MS5803-01BA model sensor. It DOES NOT
- *	work with the other pressure-range models such as the MS5803-30BA or
- *	MS5803-02BA. Those models will return incorrect pressure and temperature
- *	readings if used with this library. See http://github.com/millerlp for
- *	libraries for the other models.
- *
- * 	No warranty is given or implied. You are responsible for verifying that
- *	the outputs are correct for your sensor. There are likely bugs in
- *	this code that could result in incorrect pressure readings, particularly
- *	due to variable overflows within some pressure ranges.
- * 	DO NOT use this code in a situation that could result in harm to you or
- * 	others because of incorrect pressure readings.
- *
- *
- * 	Licensed under the GPL v3 license.
- * 	Please see accompanying LICENSE.md file for details on reuse and
- * 	redistribution.
- *
+ *	http://github.com/millerlp
+ * 
  * 	Copyright Luke Miller, April 1 2014
  *	Modified to support multiple sensors by Dale DeJager
  *	on March 17, 2019
@@ -48,8 +32,8 @@
 // Create array to hold the 8 sensor calibration coefficients
 //static unsigned int      sensorCoeffs[8]; // unsigned 16-bit integer (0-65535)
 // D1 and D2 need to be unsigned 32-bit integers (long 0-4294967295)
-static uint32_t     D1 = 0;    // Store uncompensated pressure value
-static uint32_t     D2 = 0;    // Store uncompensated temperature value
+static uint32_t     D1raw = 0;    // Store uncompensated pressure value
+static uint32_t     D2raw = 0;    // Store uncompensated temperature value
 // These three variables are used for the conversion steps
 // They should be signed 32-bit integer initially
 // i.e. signed long from -2147483648 to 2147483647
@@ -149,26 +133,26 @@ void MS_5803::readSensor() {
 	// of 1, 0.6, 0.4, 0.3, 0.2 respectively. Higher resolutions take longer
 	// to read.
 	if (_Resolution == 256){
-		D1 = MS_5803_ADC(CMD_ADC_D1 + CMD_ADC_256); // read raw pressure
-		D2 = MS_5803_ADC(CMD_ADC_D2 + CMD_ADC_256); // read raw temperature
+		D1raw = MS_5803_ADC(CMD_ADC_D1 + CMD_ADC_256); // read raw pressure
+		D2raw = MS_5803_ADC(CMD_ADC_D2 + CMD_ADC_256); // read raw temperature
 	} else if (_Resolution == 512) {
-		D1 = MS_5803_ADC(CMD_ADC_D1 + CMD_ADC_512); // read raw pressure
-		D2 = MS_5803_ADC(CMD_ADC_D2 + CMD_ADC_512); // read raw temperature
+		D1raw = MS_5803_ADC(CMD_ADC_D1 + CMD_ADC_512); // read raw pressure
+		D2raw = MS_5803_ADC(CMD_ADC_D2 + CMD_ADC_512); // read raw temperature
 	} else if (_Resolution == 1024) {
-		D1 = MS_5803_ADC(CMD_ADC_D1 + CMD_ADC_1024); // read raw pressure
-		D2 = MS_5803_ADC(CMD_ADC_D2 + CMD_ADC_1024); // read raw temperature
+		D1raw = MS_5803_ADC(CMD_ADC_D1 + CMD_ADC_1024); // read raw pressure
+		D2raw = MS_5803_ADC(CMD_ADC_D2 + CMD_ADC_1024); // read raw temperature
 	} else if (_Resolution == 2048) {
-		D1 = MS_5803_ADC(CMD_ADC_D1 + CMD_ADC_2048); // read raw pressure
-		D2 = MS_5803_ADC(CMD_ADC_D2 + CMD_ADC_2048); // read raw temperature
+		D1raw = MS_5803_ADC(CMD_ADC_D1 + CMD_ADC_2048); // read raw pressure
+		D2raw = MS_5803_ADC(CMD_ADC_D2 + CMD_ADC_2048); // read raw temperature
 	} else if (_Resolution == 4096) {
-		D1 = MS_5803_ADC(CMD_ADC_D1 + CMD_ADC_4096); // read raw pressure
-		D2 = MS_5803_ADC(CMD_ADC_D2 + CMD_ADC_4096); // read raw temperature
+		D1raw = MS_5803_ADC(CMD_ADC_D1 + CMD_ADC_4096); // read raw pressure
+		D2raw = MS_5803_ADC(CMD_ADC_D2 + CMD_ADC_4096); // read raw temperature
 	}
     // Calculate 1st order temperature, dT is a long signed integer
 	// D2 is originally cast as an uint32_t, but can fit in a int32_t, so we'll
 	// cast both parts of the equation below as signed values so that we can
 	// get a negative answer if needed
-    dT = (int32_t)D2 - ( (int32_t)sensorCoeffs[5] * 256 );
+    dT = (int32_t)D2raw - ( (int32_t)sensorCoeffs[5] * 256 );
     // Use integer division to calculate TEMP. It is necessary to cast
     // one of the operands as a signed 64-bit integer (int64_t) so there's no
     // rollover issues in the numerator.
@@ -257,10 +241,10 @@ void MS_5803::readSensor() {
 
     // Final compensated pressure calculation
     if (_SensorNumber == 1 || _SensorNumber == 2) {
-        mbarInt = ((D1 * Sensitivity) / 2097152 - Offset) / 32768;
+        mbarInt = ((D1raw * Sensitivity) / 2097152 - Offset) / 32768;
         mbar = (float)mbarInt / 100;
     } else if (_SensorNumber == 30) {
-        mbarInt = ((D1 * Sensitivity) / 2097152 - Offset) / 8192;
+        mbarInt = ((D1raw * Sensitivity) / 2097152 - Offset) / 8192;
         mbar = (float)mbarInt / 10;
     }
 
@@ -334,7 +318,8 @@ unsigned long MS_5803::MS_5803_ADC(char commandADC) {
     switch (commandADC & 0x0F)
     {
         case CMD_ADC_256 :
-            delay(1); // 1 ms
+            // delay(1); // 1 ms
+            delayMicroseconds(600);
             break;
         case CMD_ADC_512 :
             delay(2); // 3

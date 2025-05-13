@@ -46,6 +46,10 @@ void setup() {
     while (!Serial);
     delay(1000);
 
+    Wire1.setSDA(6);
+    Wire1.setSCL(7);
+    Wire1.setClock(400000);
+
     Wire1.begin();
     Serial.println("EEPROM test started.");
     Serial.println("Enter 1 to write data, or 2 to read data:");
@@ -91,7 +95,13 @@ void loop() {
                 return;
             }
 
+            uint32_t t0 = micros();
             uint8_t data = readFromEEPROM(address);
+            uint32_t t1 = micros();
+            Serial.print("EEPROM read took ");
+            Serial.print(t1 - t0);
+            Serial.println(" us");
+        
             Serial.print("Data at address ");
             Serial.print(address);
             Serial.print(": ");

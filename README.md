@@ -3,6 +3,16 @@
     - platform: maxgerhardt/platform-raspberrypi.git
     - board_build.core: earlephilhower (framework-arduinopico)
 
+- Pin defs
+    - c:\Users\micha\.platformio\packages\framework-arduinopico\variants\rpipico\pins_arduino.h
+
+- need to set Wire1 sda, scl, and speed
+    - Wire1.setSDA(6);
+    - Wire1.setSCL(7);
+    - Wire1.setClock(400000);
+    - Wire1.begin();
+
+
 #### Done
 
 - SD Card test
@@ -26,32 +36,29 @@
         - EN pin 13
         - works
 
-#### To Do
+- EEPROM test
+    - eeprom_test.cpp
+    - 24LC32A
+    - I2C address 0x50
+    - tested reading and writing 1 byte and power down
 
 - RTC test
     - rtc_test.cpp
     - DS3231
     - I2C address 0x68
-    - **file not tested
-    - Want to test
-        - set time and date
-        - read time and date
-        - set alarm
-        - read alarm
-        - set temperature?
-        - power down and wake up
+    - tested setting and reading time and date
+    - Want to check alarm and temperature
 
-- EEPROM test
-    - eeprom_test.cpp
-    - 24LC32A
-    - I2C address 0x50
-    - **file not tested
-    - Want to test
-        - write and read data
-        - write and read multiple bytes
-        - write and read different data types (int, float, char, etc.)
-        - write and read different sizes of data (1 byte, 2 bytes, 4 bytes, etc.)
-        - power down and wake up
+#### To Do
+- Pressure sensor test
+    - I2C
+        - I2C address 0x76
+        - 500Hz with 256 OSR, clock speed 400kHz, 600us delay
+    - SPI
+        - 
+    - use current library?
+    - try new one, use 3 separate files vs 1
+
 
 - UART header test
     - lora_test.cpp
@@ -65,11 +72,6 @@
 
 - Watchdog test
     - HB pulse pin 12
-
-- Pressure sensor test
-    - try I2C and SPI
-    - use current library?
-    - try new one, use 3 separate files vs 1
 
 - Dual core test
     - core 0 and core 1

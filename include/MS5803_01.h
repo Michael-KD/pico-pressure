@@ -64,8 +64,8 @@ public:
 //    // Return pressure in mmHg
 //    float mmHg() const				{return mmHgPress;}
     // Return the D1 and D2 values, mostly for troubleshooting
-    unsigned long D1val() const 	{return D1;}
-    unsigned long D2val() const		{return D2;}
+    unsigned long D1val() const 	{return D1raw;}
+    unsigned long D2val() const		{return D2raw;}
     
     
 private:
@@ -77,8 +77,8 @@ private:
 //    float psiGauge; // Store gauge pressure in pounds per square inch (psi)
 //    float inHgPress;	// Store pressure in inches of mercury
 //    float mmHgPress;	// Store pressure in mm of mercury
-    unsigned long D1;	// Store D1 value
-    unsigned long D2;	// Store D2 value
+    unsigned long D1raw;	// Store D1 value
+    unsigned long D2raw;	// Store D2 value
     int32_t mbarInt; // pressure in mbar, initially as a signed long integer
     // Check data integrity with CRC4
     unsigned char MS_5803_CRC(unsigned int n_prom[]); 
