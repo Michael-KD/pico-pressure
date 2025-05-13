@@ -9,6 +9,7 @@
 #include <MicroNMEA.h>
 
 #define GPS_ADDRESS 0x42
+#define GPS_EN_PIN 13
 
 
 SFE_UBLOX_GNSS myGNSS;
@@ -50,15 +51,26 @@ GPSTimeData getGPSTimeData(SFE_UBLOX_GNSS &myGNSS) {
 void setup() {
     Serial.begin(115200);
     while (!Serial);
-    delay(1000);
+    delay(500);
 
+    pinMode(GPS_EN_PIN, OUTPUT);
+    digitalWrite(GPS_EN_PIN, HIGH);
+    delay(500);
+
+    Wire1.setSDA(6);
+    Wire1.setSCL(7);
+    Wire1.setClock(400000);
+    delay(100);
     Wire1.begin();
-    delay(1000);
+    // Wire.begin();
+    
+    delay(500);
 
-    if (myGNSS.begin() == false) {
+    if (myGNSS.begin(Wire1) == false) {
         Serial.println(F("u-blox GNSS module not detected at default I2C address. Please check wiring. Freezing."));
         while (1);
     }
+    Serial.println(F("u-blox GNSS module detected."));
 
     myGNSS.setI2COutput(COM_TYPE_UBX | COM_TYPE_NMEA); //Set the I2C port to output both NMEA and UBX messages
     myGNSS.saveConfigSelective(VAL_CFG_SUBSEC_IOPORT); //Save (only) the communications port settings to flash and BBR
@@ -70,23 +82,20 @@ void setup() {
 }
 
 void loop() {
-    unsigned long currentTime = millis();
+    Serial.println("Checking GNSS");
 
-    if (currentTime - lastGPSReadTime >= 10000) {
-        myGNSS.checkUblox(); //See if new data is available. Process bytes as they come in.
-        Serial.println("Checking GNSS");
-        if(nmea.isValid() == true) {
-            long latitude_mdeg = nmea.getLatitude();
-            long longitude_mdeg = nmea.getLongitude();
+    myGNSS.checkUblox(); // See if new data is available. Process bytes as they come in.
+    delay(500);
+        // if(nmea.isValid() == true) {
+        long latitude_mdeg = nmea.getLatitude();
+        long longitude_mdeg = nmea.getLongitude();
 
-            Serial.print("Latitude (deg): ");
-            Serial.println(latitude_mdeg / 1000000., 6);
-            Serial.print("Longitude (deg): ");
-            Serial.println(longitude_mdeg / 1000000., 6);
+        Serial.print("Latitude (deg): ");
+        Serial.println(latitude_mdeg / 1000000., 6);
+        Serial.print("Longitude (deg): ");
+        Serial.println(longitude_mdeg / 1000000., 6);
 
-            nmea.clear();
-        }
+        nmea.clear();
+        // }
         
-        lastGPSReadTime = currentTime;
-    }
 }

@@ -2,16 +2,21 @@
 - PlatformIO
     - platform: maxgerhardt/platform-raspberrypi.git
     - board_build.core: earlephilhower (framework-arduinopico)
+    - board_build.f_cpu
+        - default = 133mhz, 500Hz, 29mA
+        - 200mhz, 526Hz, 37mA
+        - 50mhz, 333Hz, 20mA
 
 - Pin defs
     - c:\Users\micha\.platformio\packages\framework-arduinopico\variants\rpipico\pins_arduino.h
 
 - need to set Wire1 sda, scl, and speed
-    - Wire1.setSDA(6);
-    - Wire1.setSCL(7);
-    - Wire1.setClock(400000);
-    - Wire1.begin();
+    Wire1.setSDA(6);
+    Wire1.setSCL(7);
+    Wire1.setClock(400000);
+    Wire1.begin();
 
+- 
 
 #### Done
 
@@ -55,7 +60,7 @@
         - I2C address 0x76
         - 500Hz with 256 OSR, clock speed 400kHz, 600us delay
     - SPI
-        - 
+        - **todo
     - use current library?
     - try new one, use 3 separate files vs 1
 
@@ -67,7 +72,7 @@
     - using one as a relay to increase the range
 
 - GPS test
-    - 
+    - Getting nmea data from chip, no satellites? tried with breakout and same issue?
 
 
 - Watchdog test
