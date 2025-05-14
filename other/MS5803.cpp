@@ -1,4 +1,4 @@
-/*	MS5803_01
+/*	MS5803_
  * 	An Arduino library for the Measurement Specialties MS5803 family
  * 	of pressure sensors. This library uses I2C to communicate with the
  * 	MS5803 using the Wire library from Arduino.
@@ -10,7 +10,7 @@
  *	on March 17, 2019
  */
 
-#include "MS5803_01.h"
+#include "MS5803.h"
 #include <Wire.h>
 
 // For I2C, set the CSB Pin (pin 3) high for address 0x76, and pull low

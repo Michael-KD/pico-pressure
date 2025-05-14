@@ -1,25 +1,9 @@
-/*	MS5803_14
+/*	MS5803
  * 	An Arduino library for the Measurement Specialties MS5803 family
  * 	of pressure sensors. This library uses I2C to communicate with the
  * 	MS5803 using the Wire library from Arduino.
  *	
- *	This library only works with the MS5803-01BA model sensor. It DOES NOT
- *	work with the other pressure-range models such as the MS5803-30BA or
- *	MS5803-14BA. Those models will return incorrect pressure and temperature 
- *	readings if used with this library. See http://github.com/millerlp for
- *	libraries for the other models. 
- *	 
- * 	No warranty is given or implied. You are responsible for verifying that 
- *	the outputs are correct for your sensor. There are likely bugs in
- *	this code that could result in incorrect pressure readings, particularly
- *	due to variable overflows within some pressure ranges. 
- * 	DO NOT use this code in a situation that could result in harm to you or 
- * 	others because of incorrect pressure readings.
- * 	 
- * 	
- * 	Licensed under the GPL v3 license. 
- * 	Please see accompanying LICENSE.md file for details on reuse and 
- * 	redistribution.
+ *	http://github.com/millerlp 
  * 	
  * 	Copyright Luke Miller, April 1 2014
  *	Changed by Dale DeJager to support multiple sensors
@@ -38,7 +22,7 @@ public:
 	// The argument is the desired oversampling resolution, which has 
 	// values of 256, 512, 1024, 2048, 4096
 	// Second argument is the I2C address of the unit: either 0x76 or 0x77
-    MS_5803(uint16_t Resolution = 512, uint8_t address = 0x76, uint8_t SensorNumber = 1);
+    MS_5803(uint16_t Resolution = 512, uint8_t csPin = 13, uint8_t SensorNumber = 1);
     // Initialize the sensor 
     boolean initializeMS_5803(boolean Verbose = true);
     // Reset the sensor
@@ -89,6 +73,7 @@ private:
     unsigned int sensorCoeffs[8]; //Coefficients
     uint8_t _address; // I2C Address
     uint8_t _SensorNumber; // Sensor number
+    uint8_t _csPin; // Chip select pin for SPI
 };
 
 #endif 
