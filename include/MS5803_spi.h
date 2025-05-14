@@ -74,6 +74,7 @@ private:
     uint8_t _address; // I2C Address
     uint8_t _SensorNumber; // Sensor number
     uint8_t _csPin; // Chip select pin for SPI
+    SPISettings _spiSettings; // SPI settings
 };
 
 #endif 

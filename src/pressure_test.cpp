@@ -4,7 +4,8 @@
 
 #include <Arduino.h>
 #include <Wire.h>
-#include "MS5803_01.h"
+// #include "MS5803.h"
+#include "MS5803_spi.h"
 
 #define PRESSURE_ADDRESS 0x76
 #define OSR 256

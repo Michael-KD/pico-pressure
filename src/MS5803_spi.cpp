@@ -62,6 +62,7 @@ MS_5803::MS_5803(uint16_t Resolution, uint8_t csPin, uint8_t SensorNumber) {
 	_Resolution = Resolution;
 	_csPin = csPin;
     _SensorNumber = SensorNumber;
+    _spiSettings = SPISettings(2000000, MSBFIRST, SPI_MODE0); // 20MHz, MSB first, SPI mode 0
 
 }
 
@@ -89,13 +90,16 @@ boolean MS_5803::initializeMS_5803(boolean Verbose) {
     }
 	// Read sensor coefficients
     for (int i = 0; i < 8; i++ ){
-        uint8_t prom_addr = CMD_ADC_READ + (i * 2);
+        uint8_t prom_addr = 0xA0 | (i << 1); // maybe?
+        SPI1.beginTransaction(_spiSettings);
         digitalWrite(_csPin, LOW);
-        SPI.transfer(prom_addr);
-        uint8_t high = SPI.transfer(0x00);
-        uint8_t low = SPI.transfer(0x00);
+        SPI1.transfer(prom_addr);
+        uint8_t HighByte = SPI1.transfer(0x00);
+        uint8_t LowByte = SPI1.transfer(0x00);
         digitalWrite(_csPin, HIGH);
-        sensorCoeffs[i] = ((uint16_t)high << 8) | low;
+        SPI1.endTransaction();
+
+        sensorCoeffs[i] = ((uint16_t)HighByte << 8) | LowByte;
         if (Verbose) {
             Serial.print("C");
             Serial.print(i);
@@ -309,9 +313,11 @@ unsigned long MS_5803::MS_5803_ADC(char commandADC) {
 	// a long integer on 8-bit Arduinos.
     long result = 0;
     // Send the command to do the ADC conversion on the chip
+    SPI1.beginTransaction(_spiSettings);
     digitalWrite(_csPin, LOW);
-    SPI.transfer(CMD_ADC_CONV + commandADC);
+    SPI1.transfer(CMD_ADC_CONV + commandADC);
     digitalWrite(_csPin, HIGH);
+    SPI1.endTransaction();
     // Wait a specified period of time for the ADC conversion to happen
     // See table on page 1 of the MS5803 data sheet showing response times of
     // 0.5, 1.1, 2.1, 4.1, 8.22 ms for each accuracy level.
@@ -324,12 +330,14 @@ unsigned long MS_5803::MS_5803_ADC(char commandADC) {
     }
     
     // Now send the read command to the MS5803
+    SPI1.beginTransaction(_spiSettings);
     digitalWrite(_csPin, LOW);
-    SPI.transfer(CMD_ADC_READ);
-    uint8_t high = SPI.transfer(0x00);
-    uint8_t mid = SPI.transfer(0x00);
-    uint8_t low = SPI.transfer(0x00);
+    SPI1.transfer(CMD_ADC_READ);
+    uint8_t HighByte = SPI1.transfer(0x00);
+    uint8_t MidByte = SPI1.transfer(0x00);
+    uint8_t LowByte = SPI1.transfer(0x00);
     digitalWrite(_csPin, HIGH);
+    SPI1.endTransaction();
 
     // Combine the bytes into one integer
     result = ((long)HighByte << 16) + ((long)MidByte << 8) + (long)LowByte;
@@ -339,8 +347,10 @@ unsigned long MS_5803::MS_5803_ADC(char commandADC) {
 //----------------------------------------------------------------
 // Sends a power on reset command to the sensor.
 void MS_5803::resetSensor() {
+        SPI1.beginTransaction(_spiSettings);
         digitalWrite(_csPin, LOW);
         SPI1.transfer(CMD_RESET);
         digitalWrite(_csPin, HIGH);
+        SPI1.endTransaction();
         delay(10);
 }
