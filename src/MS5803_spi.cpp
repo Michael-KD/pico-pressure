@@ -70,6 +70,9 @@ MS_5803::MS_5803(uint16_t Resolution, uint8_t csPin, uint8_t SensorNumber) {
 boolean MS_5803::initializeMS_5803(boolean Verbose) {
     pinMode(_csPin, OUTPUT);
     digitalWrite(_csPin, HIGH); // Deselect sensor
+
+    SPI1.setMISO(8);
+    SPI1.setCS(9);
     SPI1.begin();    
 
     // Reset the sensor during startup
@@ -138,7 +141,10 @@ void MS_5803::readSensor() {
 	// to read.
 	if (_Resolution == 256){
 		D1raw = MS_5803_ADC(CMD_ADC_D1 + CMD_ADC_256); // read raw pressure
-		D2raw = MS_5803_ADC(CMD_ADC_D2 + CMD_ADC_256); // read raw temperature
+        if (micros() - lastTempRead > 1000000) { // only read new temperature every second
+            D2raw = MS_5803_ADC(CMD_ADC_D2 + CMD_ADC_256); // read raw temperature
+            lastTempRead = micros();
+        }
 	} else if (_Resolution == 512) {
 		D1raw = MS_5803_ADC(CMD_ADC_D1 + CMD_ADC_512); // read raw pressure
 		D2raw = MS_5803_ADC(CMD_ADC_D2 + CMD_ADC_512); // read raw temperature
@@ -152,6 +158,11 @@ void MS_5803::readSensor() {
 		D1raw = MS_5803_ADC(CMD_ADC_D1 + CMD_ADC_4096); // read raw pressure
 		D2raw = MS_5803_ADC(CMD_ADC_D2 + CMD_ADC_4096); // read raw temperature
 	}
+
+    // timer for math operations
+    unsigned long mathStart = micros();
+
+
     // Calculate 1st order temperature, dT is a long signed integer
 	// D2 is originally cast as an uint32_t, but can fit in a int32_t, so we'll
 	// cast both parts of the equation below as signed values so that we can
@@ -255,6 +266,12 @@ void MS_5803::readSensor() {
 	// Calculate the human-readable temperature in Celsius
 	tempC  = (float)TEMP / 100;
 
+    // End the timer for math operations
+    unsigned long mathEnd = micros();
+    Serial.print(">Math time (us):");
+    Serial.println(mathEnd - mathStart);
+
+
     // Start other temperature conversions by converting mbar to psi absolute
 //    psiAbs = mbar * 0.0145038;
 //    // Convert psi absolute to inches of mercury
@@ -322,7 +339,7 @@ unsigned long MS_5803::MS_5803_ADC(char commandADC) {
     // See table on page 1 of the MS5803 data sheet showing response times of
     // 0.5, 1.1, 2.1, 4.1, 8.22 ms for each accuracy level.
     switch (commandADC & 0x0F) {
-        case CMD_ADC_256: delayMicroseconds(600); break;
+        case CMD_ADC_256: delayMicroseconds(540); break;
         case CMD_ADC_512: delay(2); break;
         case CMD_ADC_1024: delay(4); break;
         case CMD_ADC_2048: delay(6); break;

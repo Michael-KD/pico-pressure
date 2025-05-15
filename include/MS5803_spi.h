@@ -15,6 +15,7 @@
 #define __MS_5803__
 
 #include <Arduino.h>
+#include <SPI.h>
 
 class MS_5803 {
 public:
@@ -22,7 +23,7 @@ public:
 	// The argument is the desired oversampling resolution, which has 
 	// values of 256, 512, 1024, 2048, 4096
 	// Second argument is the I2C address of the unit: either 0x76 or 0x77
-    MS_5803(uint16_t Resolution = 512, uint8_t csPin = 13, uint8_t SensorNumber = 1);
+    MS_5803(uint16_t Resolution = 512, uint8_t csPin = PIN_SPI1_SS, uint8_t SensorNumber = 1);
     // Initialize the sensor 
     boolean initializeMS_5803(boolean Verbose = true);
     // Reset the sensor
@@ -75,6 +76,9 @@ private:
     uint8_t _SensorNumber; // Sensor number
     uint8_t _csPin; // Chip select pin for SPI
     SPISettings _spiSettings; // SPI settings
+    
+    // timer for last temp read
+    unsigned long lastTempRead = 0;
 };
 
 #endif 

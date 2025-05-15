@@ -56,17 +56,18 @@ void setup() {
     pinMode(GPS_EN_PIN, OUTPUT);
     digitalWrite(GPS_EN_PIN, HIGH);
     delay(500);
-
     Wire1.setSDA(6);
     Wire1.setSCL(7);
     Wire1.setClock(400000);
     delay(100);
     Wire1.begin();
+
+
     // Wire.begin();
     
     delay(500);
 
-    if (myGNSS.begin(Wire1) == false) {
+    if (myGNSS.begin(Wire1) == false) { // change to Wire1
         Serial.println(F("u-blox GNSS module not detected at default I2C address. Please check wiring. Freezing."));
         while (1);
     }
@@ -86,7 +87,7 @@ void loop() {
 
     myGNSS.checkUblox(); // See if new data is available. Process bytes as they come in.
     delay(500);
-        // if(nmea.isValid() == true) {
+    if(nmea.isValid() == true) {
         long latitude_mdeg = nmea.getLatitude();
         long longitude_mdeg = nmea.getLongitude();
 
@@ -96,6 +97,10 @@ void loop() {
         Serial.println(longitude_mdeg / 1000000., 6);
 
         nmea.clear();
-        // }
+    }
         
+}
+
+void DevUBLOXGNSS::processNMEA(char incoming) {
+    nmea.process(incoming);
 }

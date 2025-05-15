@@ -7,24 +7,27 @@
 // #include "MS5803.h"
 #include "MS5803_spi.h"
 
-#define PRESSURE_ADDRESS 0x76
+// #define PRESSURE_ADDRESS 0x76
 #define OSR 256
+#define CS_PIN 9
 
-MS_5803 pressureSensor(OSR, PRESSURE_ADDRESS, 1);
+// MS_5803 pressureSensor(OSR, PRESSURE_ADDRESS, 1);
+MS_5803 pressureSensor(OSR, CS_PIN, 1); 
 
 
 void setup() {
     Serial.begin(115200);
     while (!Serial);
-    delay(1000);
+    delay(500);
 
 
-    Wire.setClock(400000);
-    Wire.begin();
+    // Wire.setClock(400000);
+    // Wire.begin();
+
     Serial.println("Pressure test started.");
     pressureSensor.initializeMS_5803();
     Serial.println("Pressure sensor initialized.");
-    delay(1000);
+    delay(500);
     
 }
 
@@ -36,13 +39,18 @@ void loop() {
 
     unsigned long now = millis();
 
+    unsigned long t0 = micros();
     pressureSensor.readSensor();
+    unsigned long t1 = micros();
     float pressure = pressureSensor.pressure();
     float temperature = pressureSensor.temperature();
+    unsigned long t2 = micros();
+
     Serial.print(">pressure:");
     Serial.println(pressure);
     Serial.print(">temperature:");
     Serial.println(temperature);
+    unsigned long t3 = micros();
 
     if (readingCount == 0) {
         startTime = now;
@@ -63,4 +71,17 @@ void loop() {
         readingCount = 0;
         totalDelay = 0;
     }
+    unsigned long t4 = micros();
+
+    // Serial.print(">readSensor time (us): ");
+    // Serial.println(t1 - t0);
+    // Serial.print(">conversion time (us): ");
+    // Serial.println(t2 - t1);
+    // Serial.print(">print frequency time (us): ");
+    // Serial.println(t4 - t3);
+    // unsigned long t5 = micros();
+
+    // Serial.print(">print time (us): ");
+    // Serial.println(t5 - t4);
+
 }
