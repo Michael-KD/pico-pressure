@@ -39,18 +39,18 @@ void loop() {
 
     unsigned long now = millis();
 
-    unsigned long t0 = micros();
+    // unsigned long t0 = micros();
     pressureSensor.readSensor();
-    unsigned long t1 = micros();
+    // unsigned long t1 = micros();
     float pressure = pressureSensor.pressure();
     float temperature = pressureSensor.temperature();
-    unsigned long t2 = micros();
+    // unsigned long t2 = micros();
 
-    Serial.print(">pressure:");
-    Serial.println(pressure);
-    Serial.print(">temperature:");
-    Serial.println(temperature);
-    unsigned long t3 = micros();
+    // Serial.print(">pressure:");
+    // Serial.println(pressure);
+    // Serial.print(">temperature:");
+    // Serial.println(temperature);
+    // unsigned long t3 = micros();
 
     if (readingCount == 0) {
         startTime = now;
@@ -71,7 +71,7 @@ void loop() {
         readingCount = 0;
         totalDelay = 0;
     }
-    unsigned long t4 = micros();
+    // unsigned long t4 = micros();
 
     // Serial.print(">readSensor time (us): ");
     // Serial.println(t1 - t0);

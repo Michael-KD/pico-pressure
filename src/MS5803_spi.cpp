@@ -53,6 +53,7 @@ static byte LowByte;
 
 const uint64_t POW_2_33 = 8589934592ULL; // 2^33 = 8589934592
 const uint64_t POW_2_37 = 137438953472ULL; // 2^37 = 137438953472
+const uint64_t MHZ_20 = 20000000ULL; // 20MHz = 20000000
 
 //-------------------------------------------------
 // Constructor
@@ -62,7 +63,7 @@ MS_5803::MS_5803(uint16_t Resolution, uint8_t csPin, uint8_t SensorNumber) {
 	_Resolution = Resolution;
 	_csPin = csPin;
     _SensorNumber = SensorNumber;
-    _spiSettings = SPISettings(2000000, MSBFIRST, SPI_MODE0); // 20MHz, MSB first, SPI mode 0
+    _spiSettings = SPISettings(MHZ_20, MSBFIRST, SPI_MODE0); // 20MHz, MSB first, SPI mode 0
 
 }
 
@@ -160,7 +161,7 @@ void MS_5803::readSensor() {
 	}
 
     // timer for math operations
-    unsigned long mathStart = micros();
+    // unsigned long mathStart = micros();
 
 
     // Calculate 1st order temperature, dT is a long signed integer
@@ -267,9 +268,9 @@ void MS_5803::readSensor() {
 	tempC  = (float)TEMP / 100;
 
     // End the timer for math operations
-    unsigned long mathEnd = micros();
-    Serial.print(">Math time (us):");
-    Serial.println(mathEnd - mathStart);
+    // unsigned long mathEnd = micros();
+    // Serial.print(">Math time (us):");
+    // Serial.println(mathEnd - mathStart);
 
 
     // Start other temperature conversions by converting mbar to psi absolute
