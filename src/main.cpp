@@ -21,6 +21,7 @@ MS_5803 pressureSensor(OSR, PRESSURE_CS_PIN, 1);
 SdFs sd;
 FsFile logFile;
 
+float startTime = 0;
 
 struct PressureSample {
     float pressure;
@@ -28,13 +29,14 @@ struct PressureSample {
     float timestamp;
 };
 
-const size_t BUFFER_SIZE = 128;
+const size_t BUFFER_SIZE = 256;
 volatile PressureSample buffer[BUFFER_SIZE];
 volatile size_t head = 0; // write index (loop)
 volatile size_t tail = 0; // read index (loop1)
 
 size_t droppedSamples = 0;
 
+// *** CORE 0 ****
 
 void setup() {
     Serial.begin(115200);
@@ -47,11 +49,44 @@ void setup() {
     delay(200);
 
     droppedSamples = 0;
+    // addedSamples = 0;
 
     // multicore_launch_core1(setup1);
+    startTime = micros();    
 
 }
 
+
+void loop() {
+    pressureSensor.readSensor();
+    float timestamp = micros() - startTime;
+    float pressure = pressureSensor.pressure();
+    float temperature = pressureSensor.temperature();
+
+    // Calculate next head index
+    size_t nextHead = (head + 1) % BUFFER_SIZE;
+
+    // Check for buffer full (don't overwrite unread data)
+    if (nextHead != tail) {
+        // Store data in buffer
+        buffer[head].pressure = pressure;
+        buffer[head].temperature = temperature;
+        buffer[head].timestamp = timestamp;
+        head = nextHead;
+        // addedSamples++;
+        // Serial.print("Added samples: ");
+        // Serial.println(addedSamples);
+
+    } else {
+        // Buffer is full, increment dropped samples
+        droppedSamples++;
+        Serial.print("Dropped samples: ");
+        Serial.println(droppedSamples);
+    }
+
+}
+
+// *** CORE 1 ****
 
 void setup1() {
     while (!Serial);
@@ -75,32 +110,8 @@ void setup1() {
 }
 
 
-void loop() {
-    pressureSensor.readSensor();
-    float timestamp = micros();
-    float pressure = pressureSensor.pressure();
-    float temperature = pressureSensor.temperature();
-
-    // Calculate next head index
-    size_t nextHead = (head + 1) % BUFFER_SIZE;
-
-    // Check for buffer full (don't overwrite unread data)
-    if (nextHead != tail) {
-        // Store data in buffer
-        buffer[head].pressure = pressure;
-        buffer[head].temperature = temperature;
-        buffer[head].timestamp = timestamp;
-        head = nextHead;
-    } else {
-        // Buffer is full, increment dropped samples
-        droppedSamples++;
-        Serial.print("Dropped samples: ");
-        Serial.println(droppedSamples);
-    }
-
-}
-
 void loop1() {
+    static int writeCount = 0;
     // Check if buffer is not empty
     while (tail != head) {
         // Copy out the sample
@@ -118,7 +129,12 @@ void loop1() {
         logFile.print(sample.pressure, 4);
         logFile.print(",");
         logFile.println(sample.temperature, 2);
-        logFile.flush();
+        writeCount++;
+
+        if (writeCount >= 100) {
+            logFile.flush();
+            writeCount = 0;
+        }
     }
     delay(1); // Optional
 }

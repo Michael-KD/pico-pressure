@@ -142,7 +142,7 @@ void MS_5803::readSensor() {
 	// to read.
 	if (_Resolution == 256){
 		D1raw = MS_5803_ADC(CMD_ADC_D1 + CMD_ADC_256); // read raw pressure
-        if (micros() - lastTempRead > 1000000) { // only read new temperature every second
+        if (micros() - lastTempRead > 10000000) { // only read new temperature every second
             D2raw = MS_5803_ADC(CMD_ADC_D2 + CMD_ADC_256); // read raw temperature
             lastTempRead = micros();
         }
@@ -340,7 +340,7 @@ unsigned long MS_5803::MS_5803_ADC(char commandADC) {
     // See table on page 1 of the MS5803 data sheet showing response times of
     // 0.5, 1.1, 2.1, 4.1, 8.22 ms for each accuracy level.
     switch (commandADC & 0x0F) {
-        case CMD_ADC_256: delayMicroseconds(540); break;
+        case CMD_ADC_256: delayMicroseconds(600); break;
         case CMD_ADC_512: delay(2); break;
         case CMD_ADC_1024: delay(4); break;
         case CMD_ADC_2048: delay(6); break;
