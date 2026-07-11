@@ -54,6 +54,14 @@ implementing the design doc's collection-tree architecture —
 - **Telemetry with routing context** (§5.3): every report carries the
   sender's parent and top-3 neighbors, letting the base build the global
   topology map.
+- **Superframe scheduler** (§4): GPS-time-aligned windows (beacon /
+  command / telemetry / bulk / sleep) that every node computes
+  independently; transmissions are gated into their windows, telemetry
+  gets ID-ordered micro-slots, the radio duty-cycles off in the sleep
+  segment, and standby/active mode switches take effect fleet-wide at a
+  commanded absolute time. GPS-loss degrades gracefully (widened listen
+  windows). Optional — disabled, the library runs M1-style with the
+  application scheduling beacons.
 
 The same library serves both roles: node ID 0 is the root (base-station
 gateway); IDs 1–254 are field nodes.
@@ -89,6 +97,7 @@ include/mesh/
   mesh_config.h               tunables (§11 defaults), all overridable via -D
   mesh_radio.h                radio HAL vtable — the radio-agnostic boundary
   mesh_mic.h                  MIC interface: AES-128-CMAC + null stub
+  mesh_sched.h                superframe scheduler API (§4)
 src/
   frame.c                     frame build/parse (§8)
   neighbor.c                  neighbor table, observed-epoch ETX windows
@@ -98,6 +107,7 @@ src/
   command.c                   execution + ACK, per-hop-reliable tree unicast
   telemetry.c                 status reports with routing context (§5.3)
   txqueue.c                   due-time TX queue: backoffs, retries, exhaustion
+  sched.c                     superframe math, window gating, duty cycling
   mic_cmac.c                  AES-128-CMAC MIC (RFC 4493), portable software AES
   mic_null.c                  passthrough MIC stub (bench/simulator only)
   mesh.c                      init, RX dispatch, poll, introspection
@@ -187,7 +197,9 @@ mesh_node_telemetry(&mesh, status_bytes, n, now);  /* up the tree */
 ### Base-station side
 
 ```c
-mesh_root_beacon(&mesh, now);   /* once per superframe — app schedules */
+/* With cfg.sched.enabled the library beacons itself each superframe;
+ * otherwise the app calls this on its own schedule: */
+mesh_root_beacon(&mesh, now);
 
 uint16_t id = mesh_root_command(&mesh, MESH_ID_BROADCAST,
                                 arm_payload, n, 0, now);
@@ -212,8 +224,12 @@ top-3 neighbors — the base's topology map (§5.3) falls straight out.
 - **Scenario tests** run whole fleets on the simulator: 10-node tree
   formation, deterministic relay-death self-healing with hysteresis-gated
   re-optimization, a 20 %-loss 6-node line flood with exactly-once
-  execution, targeted commands, telemetry topology mapping, and a
-  CMAC-authenticated fleet that locks out a wrong-key node.
+  execution, targeted commands, telemetry topology mapping, a
+  CMAC-authenticated fleet that locks out a wrong-key node, and a fully
+  scheduled fleet (auto-beacons, window-gated traffic, radios asleep
+  between superframes, synchronized mode switch). A 25-seed sweep of
+  the scheduled scenario shows zero frames ever transmitted into a
+  sleeping receiver — window gating and the listen schedule agree.
 - The protocol was additionally validated with a 25-seed randomized sweep
   of the healing and lossy-flood scenarios (50 runs, 0 failures); the
   committed tests use fixed seeds and are fully deterministic.
@@ -261,7 +277,7 @@ gap (§10.2).
 | Milestone | Contents | Status |
 |---|---|---|
 | **M1: Core mesh** | frame codec, radio HAL, ETX + collection tree, command flooding + ACKs, telemetry, host simulator | **done** |
-| **M2: Superframe scheduler** | GPS-time-aligned windows (beacon/command/telemetry/bulk), duty-cycled listening, standby/active modes (§4) | planned |
+| **M2: Superframe scheduler** | GPS-time-aligned windows (beacon/command/telemetry/bulk), duty-cycled listening, standby/active modes (§4) | **done** |
 | **M3: Bulk transfer** | chunked FETCH sessions, store-and-forward burst relaying, selective-ACK bitmaps, resumption by session id (§7) | planned |
 | **M4: Link security** | AES-128-CMAC MIC **done** (RFC 4493 KAT-verified, used by tests/demo/examples); replay protection + key provisioning workflow remain (§10.2 Rev B) | **partial** |
 | **M5: Pico port** | RYLR998 driver + field-node/base examples **done** (cross-built with pico-sdk); GPS/PPS time source and flash route cache (§5.3) remain | **partial** |
@@ -278,13 +294,13 @@ gap (§10.2).
   for the bench, not a production provisioning flow. Change the key per
   deployment; whoever has it can inject ARM commands. The null MIC still
   exists for the simulator — never field it.
-- **Example firmware clocks from `time_us_64()`** (µs since boot), not
-  GPS. The M1 mesh only needs monotonic local time, but real ARM
-  validity windows and superframe scheduling need the GPS/PPS time
-  source (M2/M5).
-- No superframe scheduling yet: the application decides when the root
-  beacons and how nodes duty-cycle; the library assumes the radio
-  listens whenever the app lets it (M2).
+- **The scheduler needs a shared clock.** Superframe alignment assumes
+  every node's `now_us` is the same GPS-disciplined timebase. The
+  example firmware clocks from `time_us_64()` (µs since boot,
+  per-board), so it keeps the scheduler disabled — and ARM validity
+  windows unenforced — until the GPS/PPS time source lands (M5). Nodes
+  that lose GPS lock should report drift via
+  `mesh_sched_clock_uncertainty()`.
 - Neighbor/route state is RAM-only; the §5.3 flash cache for instant
   post-reboot route resumption comes with the Pico port (M5).
 - `DATA`/`DATA_ACK`/`SESSION` frame types are reserved but unimplemented

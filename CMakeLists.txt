@@ -10,6 +10,7 @@ add_library(mesh STATIC
     src/mic_null.c
     src/mic_cmac.c
     src/txqueue.c
+    src/sched.c
     src/neighbor.c
     src/tree.c
     src/beacon.c

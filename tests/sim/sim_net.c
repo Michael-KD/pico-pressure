@@ -62,6 +62,12 @@ static bool sim_transmit(void *ctx, const uint8_t *frame, size_t len,
     return true;
 }
 
+static void sim_set_listen(void *ctx, bool enable, mesh_profile_t profile)
+{
+    (void)profile;
+    ((sim_node_t *)ctx)->listening = enable;
+}
+
 /* ---- application callbacks ---- */
 
 static bool sim_on_command(void *user, uint16_t cmd_id,
@@ -118,8 +124,11 @@ static void sim_node_setup(sim_net_t *s, unsigned i,
     cfg.network_id = 0xD5E7; /* "desert" */
     cfg.radio.ctx = node;
     cfg.radio.transmit = sim_transmit;
+    cfg.radio.set_listen = sim_set_listen;
     if (mic)
         cfg.mic = *mic;
+    if (s->sched)
+        cfg.sched = *s->sched;
     cfg.rng_seed = s->seed0 * 2654435761u + (uint32_t)i + 1;
     cfg.cb.user = node;
     if (i == 0) {
@@ -131,13 +140,15 @@ static void sim_node_setup(sim_net_t *s, unsigned i,
     mesh_init(&node->mesh, &cfg);
 }
 
-void sim_init_mic(sim_net_t *s, unsigned n, uint32_t seed,
-                  const mesh_mic_ops_t *mic)
+void sim_init_opt(sim_net_t *s, unsigned n, uint32_t seed,
+                  const mesh_mic_ops_t *mic,
+                  const mesh_sched_cfg_t *sched)
 {
     memset(s, 0, sizeof(*s));
     s->n_nodes = n;
     s->seed0 = seed;
     s->mic = mic;
+    s->sched = sched;
     s->rng = seed ? seed : 1;
     memset(s->loss_pct, SIM_NO_LINK, sizeof(s->loss_pct));
     memset(s->reported_parent, MESH_ID_NONE, sizeof(s->reported_parent));
@@ -146,9 +157,15 @@ void sim_init_mic(sim_net_t *s, unsigned n, uint32_t seed,
         sim_node_setup(s, i, mic);
 }
 
+void sim_init_mic(sim_net_t *s, unsigned n, uint32_t seed,
+                  const mesh_mic_ops_t *mic)
+{
+    sim_init_opt(s, n, seed, mic, NULL);
+}
+
 void sim_init(sim_net_t *s, unsigned n, uint32_t seed)
 {
-    sim_init_mic(s, n, seed, NULL);
+    sim_init_opt(s, n, seed, NULL, NULL);
 }
 
 void sim_set_node_mic(sim_net_t *s, uint8_t id, const mesh_mic_ops_t *mic)
@@ -189,7 +206,9 @@ static void sim_step(sim_net_t *s)
             continue;
         f->used = false;
         sim_node_t *rx = &s->nodes[f->to];
-        if (rx->alive)
+        if (rx->alive && !rx->listening)
+            s->frames_missed_asleep++;
+        else if (rx->alive)
             mesh_rx(&rx->mesh, f->buf, f->len, f->rssi, 8, s->now);
     }
 

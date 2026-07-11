@@ -58,9 +58,12 @@ bool mesh_node_telemetry(mesh_t *m, const uint8_t *payload, uint8_t len,
     if (len > 0)
         memcpy(&body[MESH_TELEM_HDR], payload, len);
 
-    if (!mesh_up_send(m, MESH_FT_TELEM, body,
-                      (uint8_t)(MESH_TELEM_HDR + len), MESH_FLOOD_TTL,
-                      now_us))
+    /* Own-origin reports go out in this node's ID-ordered micro-slot of
+     * the telemetry window (§4); with the scheduler disabled this is
+     * just now + desync jitter. */
+    if (!mesh_up_send_at(m, MESH_FT_TELEM, body,
+                         (uint8_t)(MESH_TELEM_HDR + len), MESH_FLOOD_TTL,
+                         mesh_sched_telem_due(m, now_us)))
         return false;
     m->stats.telem_sent++;
     return true;

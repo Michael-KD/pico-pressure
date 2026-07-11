@@ -5,7 +5,7 @@
 
 **Scope:** network architecture, routing, command dissemination, and bulk data retrieval for 2–30 solar-powered sensor nodes with GPS time reference. Implementation details (firmware structure, driver code) are out of scope, but Revision B folds back what implementing and simulating the core mesh taught us.
 
-**Implementation status:** the core mesh (§5, §6, §8, and the MIC of §10.2) is implemented as the radio-agnostic C library at the root of this repository, validated on a host simulator (fixed-seed scenario tests plus a 25-seed randomized sweep) — see `README.md`. Superframe scheduling (§4) and bulk transfer (§7) are design-only as of this revision.
+**Implementation status:** the core mesh (§5, §6, §8, the MIC of §10.2, and the §4 superframe scheduler) is implemented as the radio-agnostic C library at the root of this repository, validated on a host simulator (fixed-seed scenario tests plus 25-seed randomized sweeps) — see `README.md`. Bulk transfer (§7) is design-only as of this revision.
 
 ### Revision History
 
@@ -121,6 +121,14 @@ GPS provides each node with absolute time (PPS + NMEA). The protocol divides tim
 The superframe period is an operating-mode parameter: e.g., every 15 minutes in standby (very low power), every 60 seconds in an active test window, and continuous during retrieval sessions. Mode changes are themselves commands, and every command carries the mode's start/stop GPS times so a node that misses the original command can still infer the schedule from any relayed copy.
 
 If a node loses GPS lock, it free-runs on its crystal (drift of a few ppm) and widens its receive windows proportionally to time-since-lock — degrading gracefully rather than dropping off the network.
+
+**Implementation notes (M2).** Details pinned down when this section was built:
+
+- **Alignment origin.** Superframe 0 of the initial mode starts at absolute time 0; each commanded mode change restarts superframe 0 at the command's effective time. Both are fleet-wide constants, so alignment needs no negotiation and survives reboots.
+- **Window discipline.** Every queued transmission is gated into its window by class (beacons; commands *and their ACKs* in the command window; telemetry in its window); a send requested outside its window silently waits for the next opening, with re-randomized backoff so deferred senders don't collide at the window edge. Hop-level ACKs are immediate responses and are never deferred. Simulation across randomized seeds shows zero frames transmitted into sleeping receivers.
+- **Guard margin.** Radios listen from (superframe start − guard − clock uncertainty) to (last active window end + guard + uncertainty), default guard 100 ms; when the uncertainty flanks swallow the sleep segment the node degrades to always-listening, which is the §4 GPS-loss behavior.
+- **Telemetry micro-slots** are ID-ordered within the telemetry window (default 1 s slots) and apply to a node's *own* reports; relayed reports flow immediately so a deep node's telemetry is not delayed a superframe per hop.
+- **One pending mode switch at a time.** The SLEEP/WAKE command carries (mode, effective GPS time); nodes that miss it and stay in the old mode still overlap the new schedule's beacon window often enough to be recovered by re-floods — but the base should treat mode switches like ARM: verify the ACK checklist.
 
 ---
 

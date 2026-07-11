@@ -87,6 +87,41 @@ static void txq_exhausted(mesh_t *m, mesh_txq_entry_t *e)
     }
 }
 
+/* Window class of a queued entry, derived from what it carries (§4). */
+static uint8_t txq_win(const mesh_txq_entry_t *e)
+{
+    if (e->kind == MESH_TXK_BEACON)
+        return MESH_WIN_BEACON;
+    switch (e->buf[MESH_OFF_TYPE]) {
+    case MESH_FT_BEACON:
+        return MESH_WIN_BEACON;
+    case MESH_FT_CMD:
+    case MESH_FT_CMD_ACK:
+        return MESH_WIN_CMD; /* "commands and command ACK collection" */
+    case MESH_FT_TELEM:
+        return MESH_WIN_TELEM;
+    case MESH_FT_DATA:
+    case MESH_FT_DATA_ACK:
+    case MESH_FT_SESSION:
+        return MESH_WIN_BULK;
+    default:
+        return MESH_WIN_ANY; /* HOP_ACK: immediate link response */
+    }
+}
+
+/* Re-jitter for an entry deferred to a window start, so every deferred
+ * sender does not fire at the same instant. */
+static uint32_t txq_defer_jitter(mesh_t *m, const mesh_txq_entry_t *e)
+{
+    if (e->await_hop_ack)
+        return mesh_rand_below(m, MESH_UP_JITTER_US);
+    if (e->kind == MESH_TXK_BEACON)
+        return mesh_rand_below(m, MESH_BEACON_BACKOFF_US);
+    if (e->buf[MESH_OFF_TYPE] == MESH_FT_CMD && !m->is_root)
+        return mesh_rand_below(m, MESH_FLOOD_BACKOFF_US); /* flood relay */
+    return 0; /* root's own beacon/flood: fire at window start */
+}
+
 static void txq_fire(mesh_t *m, mesh_txq_entry_t *e, uint64_t now)
 {
     if (e->kind == MESH_TXK_BEACON) {
@@ -127,8 +162,17 @@ uint64_t mesh_txq_poll(mesh_t *m, uint64_t now)
         mesh_txq_entry_t *e = &m->txq[i];
         if (!e->in_use)
             continue;
-        if (e->due_us <= now)
-            txq_fire(m, e, now);
+        if (e->due_us <= now) {
+            /* Superframe gating (§4): an entry due outside its window
+             * is rescheduled to the window's next opening. */
+            uint64_t gate = mesh_sched_gate(m, txq_win(e), now);
+            if (gate > now) {
+                e->due_us = gate + txq_defer_jitter(m, e);
+                m->stats.tx_deferred++;
+            } else {
+                txq_fire(m, e, now);
+            }
+        }
         if (e->in_use && e->due_us < next)
             next = e->due_us;
     }

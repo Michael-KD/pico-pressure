@@ -55,8 +55,8 @@ static bool up_seen(mesh_t *m, uint8_t src, uint8_t type, uint16_t seq)
 
 /* ---- sending ---- */
 
-bool mesh_up_send(mesh_t *m, uint8_t type, const uint8_t *payload,
-                  uint8_t plen, uint8_t ttl, uint64_t now)
+bool mesh_up_send_at(mesh_t *m, uint8_t type, const uint8_t *payload,
+                     uint8_t plen, uint8_t ttl, uint64_t due)
 {
     if (m->is_root)
         return false;
@@ -72,9 +72,15 @@ bool mesh_up_send(mesh_t *m, uint8_t type, const uint8_t *payload,
                                   payload, plen);
     if (!len)
         return false;
-    uint64_t due = now + mesh_rand_below(m, MESH_UP_JITTER_US);
     return mesh_txq_unicast(m, buf, (uint8_t)len, due, m->parent, type,
                             seq);
+}
+
+bool mesh_up_send(mesh_t *m, uint8_t type, const uint8_t *payload,
+                  uint8_t plen, uint8_t ttl, uint64_t now)
+{
+    return mesh_up_send_at(m, type, payload, plen, ttl,
+                           now + mesh_rand_below(m, MESH_UP_JITTER_US));
 }
 
 static void send_cmd_ack(mesh_t *m, uint16_t cmd_id, uint8_t status,

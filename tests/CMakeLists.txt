@@ -18,6 +18,7 @@ mesh_add_test(test_mic unit/test_mic.c)
 mesh_add_test(test_neighbor unit/test_neighbor.c)
 mesh_add_test(test_tree unit/test_tree.c)
 mesh_add_test(test_flood unit/test_flood.c)
+mesh_add_test(test_sched unit/test_sched.c)
 
 # The RYLR998 example driver core is platform-free, so its AT state
 # machine is tested here on the host (the Pico glue only moves bytes).

@@ -89,6 +89,28 @@ uint64_t mesh_txq_poll(mesh_t *m, uint64_t now);
 bool mesh_txq_on_hop_ack(mesh_t *m, uint8_t from, uint8_t type,
                          uint16_t seq);
 
+/* ---- sched.c (§4 superframe scheduler) ----
+ * Window classes for queued transmissions; derived from the frame type
+ * at fire time. ANY is never deferred. */
+#define MESH_WIN_ANY    0
+#define MESH_WIN_BEACON 1
+#define MESH_WIN_CMD    2
+#define MESH_WIN_TELEM  3
+#define MESH_WIN_BULK   4
+
+/* Earliest time >= now at which `win` may transmit (now when the window
+ * is open or the scheduler is disabled). */
+uint64_t mesh_sched_gate(mesh_t *m, uint8_t win, uint64_t now);
+/* Sanity-check a mode (windows fit the period, slot fits the window). */
+bool mesh_sched_mode_valid(const mesh_sched_mode_t *md);
+/* Apply pending mode switches, drive set_listen duty cycling, originate
+ * the root's beacon at window start. Returns the next schedule edge. */
+uint64_t mesh_sched_poll(mesh_t *m, uint64_t now);
+/* Due time for an own-origin telemetry report: the node's ID-ordered
+ * micro-slot in the current/next telemetry window (now + jitter when
+ * the scheduler or slotting is disabled). */
+uint64_t mesh_sched_telem_due(mesh_t *m, uint64_t now);
+
 /* ---- neighbor.c ---- */
 mesh_neighbor_t *mesh_nbr_find(mesh_t *m, uint8_t id);
 /* Update RSSI/SNR and last-heard for any frame from `id` (adds an entry,
@@ -124,9 +146,13 @@ bool mesh_flood_seen(mesh_t *m, uint16_t seq);   /* check + insert */
 
 /* ---- command.c (execution + upward unicast engine) ---- */
 void mesh_cmd_execute(mesh_t *m, const mesh_frame_t *f, uint64_t now);
-/* Send a tree-unicast frame (CMD_ACK/TELEM payload) toward the root. */
+/* Send a tree-unicast frame (CMD_ACK/TELEM payload) toward the root.
+ * mesh_up_send adds the standard desync jitter to `now`; the _at
+ * variant takes an explicit due time (telemetry micro-slots). */
 bool mesh_up_send(mesh_t *m, uint8_t type, const uint8_t *payload,
                   uint8_t plen, uint8_t ttl, uint64_t now);
+bool mesh_up_send_at(mesh_t *m, uint8_t type, const uint8_t *payload,
+                     uint8_t plen, uint8_t ttl, uint64_t due);
 /* Handle a received CMD_ACK/TELEM frame (hop-ack, dedup, deliver/relay). */
 void mesh_up_rx(mesh_t *m, const mesh_frame_t *f, uint64_t now);
 void mesh_hop_ack_rx(mesh_t *m, const mesh_frame_t *f);

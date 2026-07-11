@@ -265,6 +265,106 @@ static void test_authenticated_fleet(void)
                    0);
 }
 
+static void test_scheduled_fleet(void)
+{
+    /* §4 end-to-end on a 4-node line with the superframe scheduler on:
+     * the root beacons itself, traffic is confined to its windows,
+     * radios sleep between superframes, and a fleet-wide mode switch
+     * keeps everyone aligned.
+     *
+     * | beacon 6s | cmd 5s | telem 6s | sleep 3s |  period 20 s */
+    static const mesh_sched_cfg_t sc = {
+        .enabled = true,
+        .guard_us = 100000,
+        .mode = {
+            .period_us = 20000000,
+            .beacon_win_us = 6000000,
+            .cmd_win_us = 5000000,
+            .telem_win_us = 6000000,
+            .bulk_win_us = 0,
+            .telem_slot_us = 1000000,
+        },
+    };
+    const uint64_t sf = sc.mode.period_us;
+
+    sim_init_opt(&net, 4, 0x5CED01, NULL, &sc);
+    for (uint8_t i = 0; i + 1 < 4; i++)
+        sim_link(&net, i, (uint8_t)(i + 1), 0);
+
+    /* No sim_epoch() here: beacons are the scheduler's job now. */
+    sim_run(&net, 6 * sf);
+    T_CHECK(sim_tree_valid(&net));
+    T_CHECK_EQ(mesh_parent(sim_mesh(&net, 1)), 0);
+    T_CHECK_EQ(mesh_parent(sim_mesh(&net, 2)), 1);
+    T_CHECK_EQ(mesh_parent(sim_mesh(&net, 3)), 2);
+
+    /* Radios sleep in the sleep segment (phase 18 s)... */
+    sim_run(&net, 18000000);
+    for (unsigned i = 0; i < net.n_nodes; i++)
+        T_CHECK(!net.nodes[i].listening);
+    /* ...and are awake in the next beacon window (phase 1 s). */
+    sim_run(&net, 3000000);
+    for (unsigned i = 0; i < net.n_nodes; i++)
+        T_CHECK(net.nodes[i].listening);
+
+    /* A command issued mid-sleep is deferred to the next command
+     * window and still executes exactly once everywhere. */
+    sim_run(&net, 17000000); /* phase 18 s again */
+    uint8_t arm[3] = { 'A', 'R', 'M' };
+    uint16_t cmd = mesh_root_command(sim_mesh(&net, 0), MESH_ID_BROADCAST,
+                                     arm, sizeof(arm), 0, net.now);
+    T_CHECK(cmd != 0);
+    sim_run(&net, 2 * sf);
+    T_CHECK(mesh_stats_get(sim_mesh(&net, 0))->tx_deferred >= 1);
+    for (unsigned i = 1; i < net.n_nodes; i++) {
+        T_CHECK_EQ(net.nodes[i].cmds_executed, 1);
+        T_CHECK_EQ(net.last_acked_cmd[i], cmd);
+        T_CHECK(net.ack_count[i] >= 1);
+    }
+
+    /* Fleet-wide STATUS-style telemetry lands via the micro-slots. */
+    uint8_t status[2] = { 0x64, 0x01 };
+    for (unsigned i = 1; i < net.n_nodes; i++)
+        T_CHECK(mesh_node_telemetry(sim_mesh(&net, (uint8_t)i), status,
+                                    sizeof(status), net.now));
+    sim_run(&net, 2 * sf);
+    for (unsigned i = 1; i < net.n_nodes; i++) {
+        T_CHECK(net.telem_count[i] >= 1);
+        T_CHECK_EQ(net.reported_parent[i],
+                   mesh_parent(sim_mesh(&net, (uint8_t)i)));
+    }
+
+    /* Fleet-synchronized switch to a faster (active) mode: every node
+     * re-aligns at the same absolute instant and traffic keeps
+     * flowing. */
+    mesh_sched_mode_t fast = {
+        .period_us = 12000000,
+        .beacon_win_us = 4000000,
+        .cmd_win_us = 3000000,
+        .telem_win_us = 3000000,
+        .bulk_win_us = 0,
+        .telem_slot_us = 500000,
+    };
+    uint64_t at = net.now + 5000000;
+    for (unsigned i = 0; i < net.n_nodes; i++)
+        T_CHECK(mesh_sched_set_mode(sim_mesh(&net, (uint8_t)i), &fast,
+                                    at));
+    sim_run(&net, 5000000 + 4 * fast.period_us);
+    T_CHECK(sim_tree_valid(&net));
+    for (unsigned i = 1; i < net.n_nodes; i++)
+        T_CHECK_EQ(mesh_sched_superframe(sim_mesh(&net, (uint8_t)i),
+                                         net.now),
+                   mesh_sched_superframe(sim_mesh(&net, 0), net.now));
+
+    cmd = mesh_root_command(sim_mesh(&net, 0), MESH_ID_BROADCAST, arm,
+                            sizeof(arm), 0, net.now);
+    sim_run(&net, 3 * fast.period_us);
+    for (unsigned i = 1; i < net.n_nodes; i++) {
+        T_CHECK_EQ(net.nodes[i].cmds_executed, 2);
+        T_CHECK_EQ(net.last_acked_cmd[i], cmd);
+    }
+}
+
 int main(void)
 {
     T_RUN(test_line3_forms_two_hop_tree);
@@ -274,5 +374,6 @@ int main(void)
     T_RUN(test_targeted_command);
     T_RUN(test_telemetry_builds_topology_map);
     T_RUN(test_authenticated_fleet);
+    T_RUN(test_scheduled_fleet);
     return t_summary();
 }

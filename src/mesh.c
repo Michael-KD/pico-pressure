@@ -29,6 +29,8 @@ bool mesh_init(mesh_t *m, const mesh_cfg_t *cfg)
         return false;
     if (cfg->rng_seed == 0)
         return false;
+    if (cfg->sched.enabled && !mesh_sched_mode_valid(&cfg->sched.mode))
+        return false;
 
     memset(m, 0, sizeof(*m));
     m->node_id = cfg->node_id;
@@ -44,6 +46,16 @@ bool mesh_init(mesh_t *m, const mesh_cfg_t *cfg)
     m->path_cost = m->is_root ? 0 : MESH_COST_INF;
     m->hops = m->is_root ? 0 : 0xFF;
     m->next_cmd_id = 1;
+
+    /* Scheduler (§4): superframe 0 of the initial mode starts at
+     * absolute time 0, so a fleet sharing GPS time is aligned with no
+     * negotiation. mesh_sched_poll() takes over set_listen from here. */
+    m->sched = cfg->sched;
+    if (m->sched.enabled && m->sched.guard_us == 0)
+        m->sched.guard_us = MESH_SCHED_GUARD_US;
+    m->mode_start_us = 0;
+    m->pending_mode_at = MESH_NO_EVENT;
+    m->listening = true;
 
     if (m->radio.set_listen)
         m->radio.set_listen(m->radio.ctx, true, MESH_PROFILE_CONTROL);
@@ -107,7 +119,11 @@ uint64_t mesh_poll(mesh_t *m, uint64_t now_us)
 {
     if (!m || !m->initialized)
         return MESH_NO_EVENT;
-    return mesh_txq_poll(m, now_us);
+    /* Scheduler first: it may switch modes, toggle the radio, or
+     * originate the root beacon that the queue pass then transmits. */
+    uint64_t next = mesh_sched_poll(m, now_us);
+    uint64_t tx = mesh_txq_poll(m, now_us);
+    return tx < next ? tx : next;
 }
 
 uint8_t mesh_parent(const mesh_t *m)

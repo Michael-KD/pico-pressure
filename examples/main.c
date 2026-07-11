@@ -9,10 +9,11 @@
  *
  * What is deliberately simplified relative to the production firmware:
  *   - Time: time_us_64() (µs since boot) instead of GPS-disciplined
- *     absolute time. The M1 mesh only needs a monotonic local clock;
- *     GPS time (and with it real ARM validity windows per §6 and
- *     superframe scheduling per §4) arrives with milestones M2/M5.
- *     Here ARM carries a duration instead of an absolute window.
+ *     absolute time. The mesh only needs a monotonic local clock, but
+ *     the library's superframe scheduler (§4, milestone M2) needs a
+ *     fleet-shared timebase, so cfg.sched stays disabled here until
+ *     the GPS/PPS time source lands (M5). Likewise ARM carries a
+ *     duration instead of an absolute validity window.
  *   - Sensors: the ARMED state toggles a flag and the LED; the 1 kHz
  *     pressure pipeline, SD logging, and the full §9 state machine live
  *     in the logger application, not in this example.

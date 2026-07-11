@@ -33,6 +33,7 @@
 #include "mesh_config.h"
 #include "mesh_mic.h"
 #include "mesh_radio.h"
+#include "mesh_sched.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -112,6 +113,7 @@ typedef struct {
     uint32_t hop_exhausted;
     uint32_t parent_changes;
     uint32_t neighbors_evicted;
+    uint32_t tx_deferred;           /* sends rescheduled into their window */
 } mesh_stats_t;
 
 /* ---- Telemetry as delivered to the root callback ----
@@ -176,6 +178,8 @@ typedef struct {
     mesh_mic_ops_t   mic;        /* compute==NULL -> mesh_mic_null */
     mesh_callbacks_t cb;         /* individual callbacks may be NULL */
     uint32_t         rng_seed;   /* nonzero; diversify per node */
+    mesh_sched_cfg_t sched;      /* superframe scheduler (§4); zeroed =
+                                  * disabled (M1 behavior) */
 } mesh_cfg_t;
 
 /* ---- Internal state (do not touch fields directly) ----
@@ -229,6 +233,16 @@ typedef struct mesh {
     uint16_t last_rebc_seq;  /* newest beacon seq already scheduled */
     bool     have_rebc;
 
+    /* superframe scheduler (§4) */
+    mesh_sched_cfg_t  sched;          /* cfg copy; .mode = current mode */
+    uint64_t          mode_start_us;  /* alignment origin of current mode */
+    mesh_sched_mode_t pending_mode;
+    uint64_t          pending_mode_at; /* MESH_NO_EVENT = none */
+    uint32_t          clock_unc_us;
+    bool              listening;      /* last state given to set_listen */
+    uint32_t          last_beacon_sf; /* root: superframe already beaconed */
+    bool              have_beacon_sf;
+
     /* sequence counters */
     uint16_t beacon_seq;     /* root: beacon originator */
     uint16_t flood_seq;      /* root: per-flood-transmission counter */
@@ -267,9 +281,11 @@ void mesh_rx(mesh_t *m, const uint8_t *data, size_t len,
  * regularly and after any mesh_rx / send call. */
 uint64_t mesh_poll(mesh_t *m, uint64_t now_us);
 
-/* Root only: originate one beacon. The application calls this once per
- * superframe (scheduling is the app's job until the superframe milestone).
- * Returns false if not root or queue full. */
+/* Root only: originate one beacon. With the scheduler disabled the
+ * application calls this once per superframe; with it enabled the
+ * library beacons automatically at each beacon-window start and the
+ * application must not call this. Returns false if not root or queue
+ * full. */
 bool mesh_root_beacon(mesh_t *m, uint64_t now_us);
 
 /* Root only: flood a command to `target` (a node ID, or

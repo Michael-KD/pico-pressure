@@ -138,4 +138,35 @@
 #define MESH_UP_JITTER_US 300000u
 #endif
 
+/* ---- Superframe scheduler (§4) ---- */
+
+/* Default window lengths (§4 table) and mode periods (§11). */
+#ifndef MESH_SF_BEACON_WIN_US
+#define MESH_SF_BEACON_WIN_US 10000000u /* 10 s */
+#endif
+#ifndef MESH_SF_CMD_WIN_US
+#define MESH_SF_CMD_WIN_US 20000000u /* 20 s */
+#endif
+#ifndef MESH_SF_TELEM_WIN_US
+#define MESH_SF_TELEM_WIN_US 30000000u /* 30 s */
+#endif
+#ifndef MESH_SF_ACTIVE_PERIOD_US
+#define MESH_SF_ACTIVE_PERIOD_US 60000000ull /* 60 s */
+#endif
+#ifndef MESH_SF_STANDBY_PERIOD_US
+#define MESH_SF_STANDBY_PERIOD_US 900000000ull /* 15 min */
+#endif
+
+/* Telemetry micro-slot width (§4: ID-ordered slots inside the
+ * telemetry window). 30 nodes x 1 s fills the default 30 s window. */
+#ifndef MESH_SF_TELEM_SLOT_US
+#define MESH_SF_TELEM_SLOT_US 1000000u
+#endif
+
+/* Listen guard: the radio wakes this early before the superframe start
+ * and stays on this long past the last active window. */
+#ifndef MESH_SCHED_GUARD_US
+#define MESH_SCHED_GUARD_US 100000u /* 100 ms */
+#endif
+
 #endif /* MESH_CONFIG_H */

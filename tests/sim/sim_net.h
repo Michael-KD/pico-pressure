@@ -26,6 +26,7 @@ typedef struct {
     sim_net_t *net;
     uint8_t id;
     bool alive;
+    bool listening; /* radio RX state, driven by set_listen */
     /* node-side application state */
     unsigned cmds_executed;
     uint16_t last_cmd_id;
@@ -45,6 +46,7 @@ struct sim_net {
     unsigned n_nodes;
     uint32_t seed0;               /* seed given to sim_init (for re-init) */
     const mesh_mic_ops_t *mic;    /* fleet MIC ops; NULL = mesh_mic_null */
+    const mesh_sched_cfg_t *sched; /* fleet scheduler cfg; NULL = off */
     sim_node_t nodes[SIM_MAX_NODES];
     /* loss_pct[a][b]: percent of frames from a lost on the way to b;
      * SIM_NO_LINK = not in radio range. */
@@ -57,7 +59,8 @@ struct sim_net {
     uint16_t last_acked_cmd[SIM_MAX_NODES];
     unsigned telem_count[SIM_MAX_NODES];
     uint8_t reported_parent[SIM_MAX_NODES];
-    unsigned frames_dropped; /* lost to link loss (diagnostics) */
+    unsigned frames_dropped;       /* lost to link loss (diagnostics) */
+    unsigned frames_missed_asleep; /* arrived while receiver slept */
 };
 
 /* Create n nodes with IDs 0..n-1 (0 is the root); no links yet. */
@@ -66,6 +69,12 @@ void sim_init(sim_net_t *s, unsigned n, uint32_t seed);
  * The ops (and their ctx) must outlive the sim. */
 void sim_init_mic(sim_net_t *s, unsigned n, uint32_t seed,
                   const mesh_mic_ops_t *mic);
+/* Full variant: optional MIC ops and optional superframe scheduler
+ * config applied fleet-wide (§4). With sched non-NULL the root beacons
+ * itself — drive time with sim_run(), not sim_epoch(). */
+void sim_init_opt(sim_net_t *s, unsigned n, uint32_t seed,
+                  const mesh_mic_ops_t *mic,
+                  const mesh_sched_cfg_t *sched);
 /* Re-initialize one node's mesh with different MIC ops — a node keyed
  * differently from the fleet (authentication tests). Resets that node's
  * mesh and app state. */
