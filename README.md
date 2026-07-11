@@ -30,8 +30,9 @@ damaged, or removed.
 
 ## What this library is
 
-The **core mesh** (milestone M1): a portable, radio-agnostic C11 library
-implementing the design doc's collection-tree architecture —
+A portable, radio-agnostic C11 library — the core mesh (M1) plus the
+superframe scheduler (M2) — implementing the design doc's
+collection-tree architecture:
 
 - **Frame codec** (§8): 12-byte overhead (8 B header + 4 B MIC trailer),
   network-ID gate, pluggable message-integrity hook.
@@ -119,7 +120,7 @@ examples/                     standalone pico-sdk project (see below)
   rylr998_pico.[ch]           Pico UART/IRQ glue for the radio driver
   radios/RYLR998/             portable AT-protocol driver core + datasheets
 tests/
-  unit/                       frame / MIC / neighbor / tree / flood / driver tests
+  unit/                       frame / MIC / sched / neighbor / tree / flood / driver tests
   sim/sim_net.[ch]            multi-node simulator: virtual clock, lossy links
   sim/test_scenarios.c        integration scenarios (see below)
   sim/demo.c                  runnable ASCII demo of the whole protocol
@@ -134,7 +135,7 @@ Build and test on any Linux host (WSL Ubuntu works; needs `cmake`,
 ```sh
 cmake -B build -G Ninja
 cmake --build build
-ctest --test-dir build            # 5 suites, all green
+ctest --test-dir build            # 8 suites, all green
 ./build/tests/mesh_demo           # watch a 10-node fleet form, flood, heal
 ```
 
@@ -168,6 +169,10 @@ optional). The base station gives you a CLI on USB serial:
 > resend        re-flood the last command for stragglers
 > stats         mesh + radio counters
 ```
+
+(Full CLI reference, including how to read the topology map and how to
+add new commands:
+[examples/BASE_STATION_COMMANDS.md](examples/BASE_STATION_COMMANDS.md).)
 
 All frames are authenticated with AES-128-CMAC under the key in
 `node_config.h`. Field nodes blink fast while searching and slow once

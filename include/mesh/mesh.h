@@ -5,7 +5,8 @@
  * Blast_Sensor_Mesh_Design.md (Rev B): collection-tree routing rooted at
  * the base station, ETX link metric from beacon reception, controlled
  * flooding for commands, per-hop-reliable tree unicast for ACKs and
- * telemetry.
+ * telemetry, and an optional GPS-aligned superframe scheduler with
+ * duty-cycled listening (mesh_sched.h).
  *
  * Usage model (single-threaded, externally clocked, no allocation):
  *   - The application owns a mesh_t (statically allocated) and calls
