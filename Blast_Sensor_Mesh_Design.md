@@ -1,9 +1,18 @@
 # Desert Blast-Wave Sensor Network
 ## LoRa Ad-Hoc Mesh: Protocol Design and Algorithms
 
-*Design Document — Revision A — July 2026*
+*Design Document — Revision B — July 2026*
 
-**Scope:** network architecture, routing, command dissemination, and bulk data retrieval for 2–30 solar-powered sensor nodes with GPS time reference. Implementation details (firmware structure, driver code) are out of scope for this revision.
+**Scope:** network architecture, routing, command dissemination, and bulk data retrieval for 2–30 solar-powered sensor nodes with GPS time reference. Implementation details (firmware structure, driver code) are out of scope, but Revision B folds back what implementing and simulating the core mesh taught us.
+
+**Implementation status:** the core mesh (§5, §6, §8, and the MIC of §10.2) is implemented as the radio-agnostic C library at the root of this repository, validated on a host simulator (fixed-seed scenario tests plus a 25-seed randomized sweep) — see `README.md`. Superframe scheduling (§4) and bulk transfer (§7) are design-only as of this revision.
+
+### Revision History
+
+| Rev | Date | Changes |
+|---|---|---|
+| A | July 2026 | Initial protocol design. |
+| B | July 2026 | Findings from the M1 implementation: observed-epoch ETX windows and estimator restart (§5.2), HOP-ACK frame type and per-hop seq semantics (§6.4, §8), two-level flood dedup — per-transmission seq vs. persistent command ID (§6), MIC implemented as AES-128-CMAC with replay protection still open (§10.2), REYAX RYLR998 selected as the first radio module with its transport constraints (§3.4), tunables table extended (§11). |
 
 ---
 
@@ -21,7 +30,7 @@
 10. [Failure Modes, Robustness, and Link Security](#10-failure-modes-robustness-and-link-security)
 11. [Tunable Parameters (Defaults)](#11-tunable-parameters-defaults)
 12. [Alternatives Considered](#12-alternatives-considered)
-13. [Open Questions for Revision B](#13-open-questions-for-revision-b)
+13. [Open Questions for Revision C](#13-open-questions-for-revision-c)
 
 ---
 
@@ -84,6 +93,17 @@ Two logical channels are recommended (implemented as different frequency channel
 
 **Regulatory note:** confirm the ISM band and duty-cycle rules for the deployment region (e.g., US 915 MHz has no duty-cycle limit but has dwell-time rules; EU 868 MHz imposes 1–10% duty cycle, which materially affects bulk transfer planning).
 
+### 3.4 Selected Radio Module (Rev B): REYAX RYLR998
+
+The first hardware iteration uses the REYAX RYLR998 (Semtech LoRa engine behind a UART AT-command interface; datasheets in `examples/radios/RYLR998/`). The protocol layer stays radio-agnostic — the RYLR998 binding is an example driver — but the module imposes transport constraints the design must respect:
+
+- **ASCII payload transport.** The AT interface specifies the `AT+SEND` data field as ASCII (max 240 bytes), so binary frames are hex-encoded on the air: 2 characters per byte, **capping a frame at 120 bytes** (108 bytes of §8 payload). Control traffic (beacons, commands, ACKs, telemetry: 15–40 B frames) is unaffected; bulk-transfer chunk size (§7.3) must be sized to ~96 B under this transport, roughly doubling chunk count and air time. Options for M3: accept the overhead, validate raw-binary AT payloads on the bench (off-spec), or move to an SPI-attached radio for bulk-heavy deployments.
+- **Single channel.** One modem, one RF profile at a time. The control/bulk split of §3.3 becomes *temporal* (reconfigure SF per bulk session) rather than concurrent — or a second module per node, which the answer to open question 3 (§13) now depends on.
+- **Modulation limits.** SF5–11 with SF ≤ 9 at 125 kHz, ≤ 10 at 250 kHz, ≤ 11 at 500 kHz — the SF12 end of the §3.3 control profile is unavailable; SF9/125 kHz (module default, ~190 B/s) is the working control profile. TX power 0–22 dBm (≤ 14 dBm for CE).
+- **Half duplex with explicit busy signaling.** The module rejects a send while the previous transmission is on the air (`+ERR=17`); the driver spaces transmissions using a conservative air-time estimate and the mesh's retransmit ladder absorbs the rest.
+- **Power modes map to §4.** `AT+MODE=1` (sleep, ~10 µA) and the smart-receive mode (`AT+MODE=2`, sub-100 µA duty-cycled listen) are the intended mechanism for superframe duty cycling in M2.
+- The module's own address/group fields duplicate mesh functions and are not relied on: every frame goes to module broadcast address 0, and deployment separation comes from the in-frame network ID plus the MIC key (§10.2), not the module's `NETWORKID`. Its `AT+CPIN` "domain password" scrambling is not used — the crypto is unspecified, and §10.2 provides real authentication.
+
 ---
 
 ## 4. Time Base and Duty Cycling
@@ -118,7 +138,13 @@ Each node maintains a neighbor table (neighbor ID, smoothed RSSI/SNR, estimated 
 path_cost(me) = min over neighbors n of ( path_cost(n) + ETX(me, n) )
 ```
 
-where ETX of a link is estimated from beacon reception ratio over a sliding window of the last K beacon sequence numbers (e.g., K = 16), smoothed with an EWMA. The neighbor minimizing the sum becomes the parent. Hysteresis is applied: a node switches parents only if the challenger beats the incumbent by a margin (e.g., 0.5 ETX) for two consecutive superframes, preventing route flapping on marginal links.
+where ETX of a link is estimated from beacon reception ratio over a sliding window of the last K beacon epochs (e.g., K = 16), smoothed with an EWMA. The neighbor minimizing the sum becomes the parent. Hysteresis is applied: a node switches parents only if the challenger beats the incumbent by a margin (e.g., 0.5 ETX) for two consecutive superframes, preventing route flapping on marginal links.
+
+**Rev B refinements (from simulator validation).** Randomized multi-seed simulation exposed three defects in the naive "window slides by beacon sequence delta" estimator, all adopted in the implementation:
+
+1. **Observed-epoch windows.** Beacons propagate as a single-shot flood wave (§5.1), so on deep or lossy paths entire epochs legitimately fail to reach a node. If the reception window slides by raw sequence delta, that upstream attenuation is booked as *local* link loss against every neighbor, inflating costs fleet-wide (simulated: clean 3-hop chains converging to ~5.7 ETX instead of 3.0, and deep nodes attaching epochs late). The window therefore slides only by epochs the node *observed* — heard at least one beacon from anyone. An epoch nobody delivered punishes no one; an epoch where some neighbors delivered and one stayed silent punishes exactly the silent one.
+2. **In-progress epoch grace.** Within a beacon window, a neighbor whose randomized rebroadcast offset simply hasn't fired yet must not be scored as a miss; the epoch in progress is excluded from the ratio until the next epoch begins. Without this, evaluation order inside the window systematically penalizes late-offset neighbors and can starve parent-switch hysteresis indefinitely.
+3. **Estimator restart on reappearance.** A neighbor silent past the staleness threshold M gets a *fresh* estimator when heard again, instead of dragging up to K epochs of outage history (at standby cadence, hours of pessimism against a healthy revived relay). Hysteresis still gates the actual parent switch, so this does not reintroduce flapping.
 
 ### 5.3 Stability Optimizations for Fixed Deployments
 
@@ -130,20 +156,32 @@ where ETX of a link is estimated from beacon reception ratio over a sliding wind
 
 - A node never selects a parent whose advertised path cost is ≥ its own current cost (standard distance-vector loop guard).
 - Beacon sequence numbers invalidate stale state: a node that has not refreshed its cost within M superframes (e.g., M = 4) advertises cost = infinity and stops relaying until re-attached.
-- If a parent dies, its children detect missed beacons/ACKs, mark the link dead, and re-select from the neighbor table within one to two superframes — no global recomputation required.
+- If a parent dies, its children detect missed beacons/ACKs, mark the link dead, and re-select from the neighbor table within one to two superframes — no global recomputation required. Per-hop ACK exhaustion (§6.4) triggers the same failover immediately, without waiting out the staleness timer.
+- **Rev B note:** unlike the ETX window (§5.2), staleness deliberately counts *raw* beacon-sequence delta, not observed epochs — the root's sequence counter is ground truth for elapsed superframes, and a dead parent must be poisoned promptly even when the node is observing little traffic.
 
 ---
 
 ## 6. Command Dissemination (Flooding)
 
-Commands are small (≤ 32-byte payload), rare, and must reach every node even when the tree is stale — for example, waking the fleet after weeks of standby. Controlled flooding is the right tool:
+Commands are small (≤ 32-byte payload), rare, and must reach every node even when the tree is stale — for example, waking the fleet after weeks of standby. Controlled flooding is the right tool.
 
-1. Base transmits the command in the command window: `{network ID, msg type, command seq (monotonic), target (node ID or 255), TTL (default 8), payload, MAC}`.
-2. Every node receiving a command with an unseen seq stores the seq in a small dedup cache, decrements TTL, and rebroadcasts once after a randomized backoff (0–2 s). Seen seqs are never rebroadcast.
+### 6.1 Flood Mechanics and Two-Level Deduplication
+
+**Rev B refinement:** implementation showed that one sequence number cannot serve both flood-relay suppression and exactly-once execution. If a re-flood reuses the original frame seq (as Rev A implied), every relay's dedup cache suppresses it and the retry never propagates. Two identifiers with different lifetimes are required:
+
+- the frame **seq** identifies one flood *transmission* — fresh for every attempt, deduplicated in a small relay cache so each node rebroadcasts a given wave at most once;
+- a 2-byte **command ID** inside the payload identifies the *command* — stable across re-floods, checked against an executed-commands cache so a node never executes twice, but re-ACKs when it sees a re-flood of something it already ran (covering the lost-ACK case).
+
+1. Base transmits the command in the command window: `{network ID, msg type, seq (fresh per attempt), target (node ID or 255), TTL (default 8), payload = command ID + opcode/args, MIC}`.
+2. Every node receiving a command frame with an unseen seq stores the seq in the relay dedup cache, decrements TTL, and rebroadcasts once after a randomized backoff (0–2 s). Seen seqs are never rebroadcast.
 3. Targeted commands (target ≠ 255) are still relayed by all nodes but executed only by the target.
-4. Execution ACKs return via the tree: each executing node unicasts an ACK to its parent, which relays upward. The base maintains a checklist and re-floods (same seq, bumped retry counter) for missing nodes up to R times before flagging them to the operator.
+4. Execution: if the command ID is new, the node executes and records it, then ACKs; if already recorded, it re-ACKs without re-executing. ACKs return via the tree (§6.4). The base maintains a checklist and re-floods the same command ID (with a fresh seq) for missing nodes up to R times before flagging them to the operator.
 
-**Safety-relevant semantics for the ARM command:** ARM carries an explicit validity window (GPS start/stop time). A node that receives ARM outside the window, or after a stop time, ignores it. This makes stale or replayed ARM commands inert (see also Section 10).
+### 6.2 Safety-Relevant Semantics for ARM
+
+ARM carries an explicit validity window (GPS start/stop time). A node that receives ARM outside the window, or after a stop time, ignores it. This makes stale or replayed ARM commands inert (see also Section 10).
+
+### 6.3 Command Set
 
 | Command | Payload | Effect |
 |---|---|---|
@@ -155,6 +193,16 @@ Commands are small (≤ 32-byte payload), rare, and must reach every node even w
 | FETCH | event ID or byte range, chunk size, session ID | Begin bulk transfer (Section 7). |
 | SET-PARAM | key, value | Update tunable (thresholds, windows, radio profile). |
 | TIME-MARK | label | Write an operator marker into the node's log. |
+
+### 6.4 Upward Traffic: Per-Hop Reliable Tree Unicast (Rev B)
+
+Command ACKs and telemetry travel node → parent → … → base. Design principle 4 (per-hop reliability) needs an explicit mechanism that Rev A's frame-type list lacked for small control frames — DATA-ACK exists only inside bulk sessions. Rev B adds a **HOP-ACK** frame type (§8):
+
+- A node unicasts an upward frame (CMD-ACK or TELEM) to its parent and expects an immediate HOP-ACK naming the acknowledged type and seq. Missing HOP-ACKs trigger retransmission (default: 3 retries at ~400 ms + random jitter).
+- The receiving parent HOP-ACKs **before** duplicate-checking, so a node whose HOP-ACK was lost (rather than its data frame) is still silenced; a per-hop dedup cache keyed `(src, type, seq)` prevents double-forwarding.
+- The frame **seq is re-stamped at every hop** — it identifies one link-layer transfer, not the end-to-end message. End-to-end identity lives in the payload (origin node ID + command ID), which is what the base's checklist keys on.
+- Repeated retry exhaustion toward the parent (default: 3 consecutive exhausted sends) declares the parent link dead and triggers the §5.4 failover immediately — per-hop ACKs double as a fast dead-parent detector between beacon epochs.
+- Sends are staggered by a random initial jitter (~0–300 ms) because a flooded broadcast command makes many nodes ACK at nearly the same moment.
 
 ---
 
@@ -191,14 +239,14 @@ All frames share a common header inside the LoRa PHY payload (max 255 B):
 | Field | Size | Notes |
 |---|---|---|
 | Network ID | 2 B | Deployment identifier; foreign frames dropped. |
-| Msg type | 1 B | BEACON, CMD, CMD-ACK, TELEM, DATA, DATA-ACK, SESSION. |
+| Msg type | 1 B | BEACON (0x01), CMD (0x02), CMD-ACK (0x03), TELEM (0x04), HOP-ACK (0x05, Rev B — §6.4), DATA (0x06), DATA-ACK (0x07), SESSION (0x08). |
 | Src ID / Dst ID | 1 B + 1 B | Dst 255 = broadcast/flood. |
-| Seq | 2 B | Per-type sequence for dedup and windows. |
+| Seq | 2 B | Per-type sequence for dedup and windows. For tree-unicast frames it is re-stamped at each hop (§6.4); end-to-end identity is payload-level. |
 | TTL / hops | 1 B | Flood control; also records hop count in beacons. |
 | Payload | 0–240 B | Type-specific. |
-| MIC | 4 B | Message integrity code (Section 10). |
+| MIC | 4 B | Message integrity code (Section 10). AES-128-CMAC truncated; covers header + payload. |
 
-Total overhead is 12 bytes, leaving ~180–240 bytes of useful payload per frame depending on radio settings — the basis for the default chunk size.
+Total overhead is 12 bytes, leaving ~180–240 bytes of useful payload per frame depending on radio settings — the basis for the default chunk size. **Rev B note:** over the RYLR998's hex-encoded AT transport (§3.4) the frame ceiling is 120 bytes (108 B payload); control frames are unaffected, bulk chunks must be sized down accordingly.
 
 ---
 
@@ -235,8 +283,9 @@ All state transitions and their causes are appended to a small event log on the 
 
 Even on a private test range, the ARM path warrants protection against accidental or malicious injection (LoRa is trivially receivable and transmittable with hobby hardware):
 
-- All frames authenticated with a 4-byte MIC (AES-CMAC truncated) under a pre-shared network key provisioned at flash time. Frames failing the MIC are dropped before parsing.
-- **Replay protection:** the MIC covers the sequence number, and nodes reject non-increasing command seqs. Combined with ARM validity windows, replayed ARM frames are doubly inert.
+- All frames authenticated with a 4-byte MIC under a pre-shared network key provisioned at flash time. Frames failing the MIC are dropped before parsing. **Implemented in Rev B:** AES-128-CMAC (RFC 4493) truncated to 4 bytes, portable software AES verified against the RFC known-answer vectors; the 2⁻³² blind-forgery bound is rate-limited by LoRa air time to a few attempts per second. The library keeps the MIC pluggable (a null stub remains for bench/simulator use only).
+- **Replay protection — open as of Rev B.** The MIC makes frames unforgeable but not un-replayable: a recorded valid frame can be retransmitted later. Current mitigations are robustness features, not security boundaries — the executed-command cache suppresses replayed command IDs only until it wraps or the node reboots, and ARM validity windows make stale ARMs inert at the application layer. A real fix needs replay state bound into the MIC: either a persisted per-origin frame counter or — more attractive here — the GPS-time superframe index that M2 introduces anyway, which every node can validate statelessly. Decide with the M2 wire-format revision (open question, §13).
+- The RYLR998's `AT+CPIN` module encryption is **not** used as a security control (unspecified algorithm); §10.2 authentication happens above the radio.
 - Payload encryption (AES-CTR) is optional and cheap on the Pico if data confidentiality is desired; authentication is the non-negotiable part.
 
 ---
@@ -246,13 +295,19 @@ Even on a private test range, the ARM path warrants protection against accidenta
 | Parameter | Default | Rationale |
 |---|---|---|
 | Superframe period (standby / active) | 15 min / 60 s | Power vs. responsiveness. |
-| Beacon ETX window K | 16 beacons | Stable ETX without long convergence. |
+| Beacon ETX window K | 16 observed epochs | Stable ETX without long convergence (§5.2 Rev B). |
 | Parent hysteresis | 0.5 ETX, 2 superframes | Prevents flapping on marginal links. |
 | Flood TTL | 8 | > expected network diameter for 30 nodes. |
 | Command retries R | 3 | Balance reach vs. air-time. |
-| Chunk payload C | 180 B | Fits one frame with header + MIC. |
+| Flood rebroadcast backoff | 0–2 s random | Desynchronizes relays (§6.1). |
+| Hop retries (tree unicast) | 3, at 400 ms + 0–200 ms jitter | Per-hop reliability without hogging air (§6.4). |
+| Parent-fail limit | 3 exhausted sends | Fast dead-parent failover between epochs (§6.4). |
+| Upward send jitter | 0–300 ms | Desynchronizes post-flood ACK bursts (§6.4). |
+| Chunk payload C | 180 B (96 B on RYLR998 AT transport) | Fits one frame with header + MIC (§3.4, §8). |
 | Burst window W | 16 chunks | ~3 kB relay RAM; good pipe utilization. |
-| Dedup cache | 32 entries | Covers TTL × retry space. |
+| Flood relay dedup cache | 32 seqs | Covers TTL × retry space. |
+| Executed-command cache | 32 command IDs | Exactly-once execution across re-floods (§6.1). |
+| Per-hop dedup cache | 16 (src, type, seq) | Covers the lost-HOP-ACK retransmit case (§6.4). |
 | Stale-route timeout M | 4 superframes | Fast poisoning of dead paths. |
 | Pre-trigger ring buffer | 10 s | Captures onset before threshold crossing. |
 
@@ -267,10 +322,14 @@ Even on a private test range, the ARM path warrants protection against accidenta
 
 ---
 
-## 13. Open Questions for Revision B
+## 13. Open Questions for Revision C
 
-1. Regulatory region and band (drives duty-cycle budget and bulk-window design).
-2. Whether RECORDING should be fully radio-silent (EMI near sensors, SD write contention) or allow beacon listening.
-3. Second radio channel feasibility on chosen LoRa module (concurrent control + bulk).
-4. Whether the base station should support a mobile mode (vehicle-mounted gateway driving the range to shorten hop counts for retrieval).
-5. Key management workflow: per-deployment key rotation at provisioning vs. fixed fleet key.
+Carried over from Rev A (with status) and new from the Rev B work:
+
+1. Regulatory region and band (drives duty-cycle budget and bulk-window design). *Examples default to US 915 MHz; still needs a per-deployment decision.*
+2. Whether RECORDING should be fully radio-silent (EMI near sensors, SD write contention) or allow beacon listening. *Open.*
+3. ~~Second radio channel feasibility on chosen LoRa module.~~ *Resolved by module selection: the RYLR998 is single-channel (§3.4). The bulk profile becomes temporal (per-session reconfiguration), unless a second module per node is added.*
+4. Whether the base station should support a mobile mode (vehicle-mounted gateway driving the range to shorten hop counts for retrieval). *Open.*
+5. Key management workflow: per-deployment key rotation at provisioning vs. fixed fleet key. *Sharpened by the Rev B MIC: the key is now load-bearing; the examples compile it in, which is not a production flow.*
+6. **New:** replay-protection mechanism (§10.2) — persisted frame counter vs. GPS-superframe-bound MIC; decide together with the M2 superframe wire format.
+7. **New:** bulk transfer over the RYLR998's hex transport (§3.4) — accept ~2× air time at 96 B chunks, qualify off-spec binary AT payloads on the bench, or move bulk-heavy deployments to an SPI radio.
