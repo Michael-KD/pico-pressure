@@ -403,8 +403,10 @@ uint16_t mesh_path_cost(const mesh_t *m);  /* Q8.8 */
 uint8_t  mesh_hops(const mesh_t *m);
 /* CRC-16/CCITT-FALSE — the per-chunk integrity check (§7.3), exposed
  * so applications can run end-to-end verification over reassembled
- * data. */
+ * data. The _step form (init 0xFFFF, fold one byte) lets a data source
+ * checksum a stream without buffering it. */
 uint16_t mesh_crc16(const uint8_t *data, size_t len);
+uint16_t mesh_crc16_step(uint16_t crc, uint8_t byte);
 const mesh_stats_t    *mesh_stats_get(const mesh_t *m);
 /* Neighbor table slot idx (0..MESH_MAX_NEIGHBORS-1); NULL if unused. */
 const mesh_neighbor_t *mesh_neighbor_at(const mesh_t *m, unsigned idx);

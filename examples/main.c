@@ -36,6 +36,7 @@
 #include "pico/unique_id.h"
 
 #include "flash_store.h"
+#include "fleet_modes.h"
 #include "gps_pico.h"
 #include "mesh/mesh.h"
 #include "node_config.h"
@@ -133,17 +134,13 @@ static uint8_t event_byte(uint32_t off)
                      (uint8_t)(off * 13) ^ (uint8_t)(off >> 5));
 }
 
-/* CRC16 of the whole synthetic event, computed without a 4 kB buffer
- * (same CRC-16/CCITT-FALSE as the library's per-chunk mesh_crc16). */
+/* CRC16 of the whole synthetic event, streamed without a 4 kB buffer
+ * (the production firmware does the same over SD reads). */
 static uint16_t event_crc16(void)
 {
     uint16_t crc = 0xFFFF;
-    for (uint32_t o = 0; o < EVENT_LEN; o++) {
-        crc ^= (uint16_t)((uint16_t)event_byte(o) << 8);
-        for (int b = 0; b < 8; b++)
-            crc = (crc & 0x8000) ? (uint16_t)((crc << 1) ^ 0x1021)
-                                 : (uint16_t)(crc << 1);
-    }
+    for (uint32_t o = 0; o < EVENT_LEN; o++)
+        crc = mesh_crc16_step(crc, event_byte(o));
     return crc;
 }
 
@@ -239,6 +236,20 @@ static bool on_command(void *user, uint16_t cmd_id,
         armed = false;
         printf("cmd %u: DISARM\n", cmd_id);
         return true;
+    case FLEET_CMD_MODE: { /* fleet mode switch (M6, §4) */
+        uint8_t mode_id;
+        uint64_t at;
+        mesh_sched_mode_t md;
+        if (!use_gps || !fleet_mode_parse(payload, len, &mode_id, &at) ||
+            !fleet_mode_by_id(mode_id, &md))
+            return false;
+        if (!mesh_sched_set_mode(&mesh, &md, at))
+            return false; /* another switch pending: no ACK, re-flood
+                           * catches us later */
+        printf("cmd %u: MODE %u at +%lus\n", cmd_id, mode_id,
+               (unsigned long)((at - now) / 1000000));
+        return true;
+    }
     case 'S': /* STATUS: report in the next second */
         telem_due = now + 1000000;
         printf("cmd %u: STATUS\n", cmd_id);
@@ -410,9 +421,7 @@ int main(void)
     };
     if (use_gps) {
         cfg.sched.enabled = true;
-        cfg.sched.mode = mesh_sched_mode_active();
-        cfg.sched.mode.period_us = SCHED_PERIOD_US;
-        cfg.sched.mode.bulk_win_us = SCHED_BULK_WIN_US;
+        fleet_mode_by_id(FLEET_MODE_ACTIVE, &cfg.sched.mode);
     }
     if (!mesh_init(&mesh, &cfg)) {
         printf("mesh_init failed (bad config)\n");

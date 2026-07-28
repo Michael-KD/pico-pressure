@@ -1,6 +1,7 @@
 /* sim_net.c — see sim_net.h. */
 #include <stdio.h>
 
+#include "fleet_modes.h" /* examples' shared mode table ('M' command) */
 #include "sim_net.h"
 
 /* ---- deterministic RNG (independent of the library's) ---- */
@@ -77,6 +78,17 @@ static bool sim_on_command(void *user, uint16_t cmd_id,
     n->cmds_executed++;
     n->last_cmd_id = cmd_id;
     n->last_cmd_byte = len ? payload[0] : 0;
+    /* Fleet mode switch ('M', M6): mirror the field firmware — apply
+     * the commanded mode at its absolute effective time. */
+    if (len == FLEET_MODE_PLEN && payload[0] == FLEET_CMD_MODE) {
+        uint8_t mode_id;
+        uint64_t at;
+        mesh_sched_mode_t md;
+        if (!fleet_mode_parse(payload, len, &mode_id, &at) ||
+            !fleet_mode_by_id(mode_id, &md))
+            return false;
+        return mesh_sched_set_mode(&n->mesh, &md, at);
+    }
     return true;
 }
 
@@ -90,6 +102,8 @@ static void sim_on_command_ack(void *user, uint8_t origin,
         s->ack_count[origin]++;
         s->last_acked_cmd[origin] = cmd_id;
     }
+    if (s->ack_hook)
+        s->ack_hook(s, origin, cmd_id);
 }
 
 static void sim_on_telemetry(void *user, const mesh_telem_info_t *info,
@@ -114,9 +128,30 @@ static uint8_t sim_on_bulk_read(void *user, uint8_t session,
                                 uint32_t offset, uint8_t *buf,
                                 uint8_t max)
 {
-    (void)session;
     sim_node_t *n = (sim_node_t *)user;
     sim_net_t *s = n->net;
+
+    if (session == 0) {
+        /* LIST convention: an index line in the same format as the
+         * example field firmware, so the base-policy engine can parse
+         * it (M6). */
+        char idx[64];
+        uint16_t crc = 0xFFFF;
+        for (uint32_t o = 0; o < s->bulk_src_len; o++) {
+            uint8_t b = sim_bulk_byte(n->id, o);
+            crc = mesh_crc16_step(crc, b);
+        }
+        int len = snprintf(idx, sizeof(idx),
+                           "node %u: evt 1, %u B, crc16 %04X", n->id,
+                           (unsigned)s->bulk_src_len, crc);
+        uint8_t i = 0;
+        while (i < max && offset + i < (uint32_t)len) {
+            buf[i] = (uint8_t)idx[offset + i];
+            i++;
+        }
+        return i;
+    }
+
     uint8_t i = 0;
     while (i < max && offset + i < s->bulk_src_len) {
         buf[i] = sim_bulk_byte(n->id, offset + i);
@@ -131,6 +166,8 @@ static void sim_on_bulk_data(void *user, uint8_t session,
 {
     sim_node_t *root = (sim_node_t *)user;
     sim_net_t *s = root->net;
+    if (s->bulk_hook)
+        s->bulk_hook(s, session, chunk_index, data, len);
     if (session != s->bulk_session)
         return;
     if (chunk_index < SIM_BULK_MAX_CHUNKS &&

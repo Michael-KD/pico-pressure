@@ -37,6 +37,23 @@ mesh_sched_mode_t mesh_sched_mode_standby(void)
     return md;
 }
 
+mesh_sched_mode_t mesh_sched_mode_retrieval(void)
+{
+    /* §4 "continuous during retrieval sessions" / §7.4: half the
+     * superframe is bulk window, command window big enough for FETCH
+     * floods, telemetry trimmed (and unslotted — reports are sparse
+     * during a transfer). */
+    mesh_sched_mode_t md = {
+        .period_us = MESH_SF_RETRIEVAL_PERIOD_US,
+        .beacon_win_us = MESH_SF_BEACON_WIN_US,
+        .cmd_win_us = MESH_SF_RETRIEVAL_CMD_WIN_US,
+        .telem_win_us = MESH_SF_RETRIEVAL_TELEM_WIN_US,
+        .bulk_win_us = MESH_SF_RETRIEVAL_BULK_US,
+        .telem_slot_us = 0,
+    };
+    return md;
+}
+
 /* Sum of the active windows = offset where the sleep segment starts. */
 static uint64_t active_end(const mesh_sched_mode_t *md)
 {

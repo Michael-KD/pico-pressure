@@ -135,6 +135,8 @@ src/
 examples/                     standalone pico-sdk project (see below)
   main.c                      field-node firmware (Pico + RYLR998)
   base_station.c              base-gateway firmware with USB-serial CLI
+  base_policy.[ch]            M6 retrieval campaign engine (§7.4 policy)
+  fleet_modes.h               shared mode table + mode-switch command
   node_config.h               deployment radio/timing config + bench fallbacks
   provision.[ch]              flash provisioning blob codec (ID + net + key)
   provision_cli.c             `provision` CLI command (both firmwares)
@@ -207,6 +209,9 @@ The base station gives you a CLI on USB serial:
 > fetch 3       retrieve node 3's event data over the mesh
 > fstat         chunks received / missing; final CRC
 > refetch       resume from the first missing chunk
+> retrieve      full campaign: retrieval mode, every node, verified
+> rstat         campaign progress / per-node results
+> mode standby  flood a fleet mode switch (active|standby|retrieval)
 ```
 
 (Full CLI reference, including how to read the topology map and how to
@@ -322,6 +327,11 @@ base and only a cursor at the node.
   scratch instead of trusting the stale cache); a rebooted base first
   demonstrates the seq-0 wedge without persistence, then recovers the
   fleet with restored counters and keeps commands exactly-once.
+- **Retrieval campaign (M6):** the base-policy engine, against a lossy
+  scheduled CMAC fleet that starts with *no* bulk window: switches the
+  fleet into retrieval mode by flooded command, LISTs and fetches every
+  node with CRC verification, switches the fleet back to standby, and
+  confirms bulk fails fast again — zero MIC drops throughout.
 - The protocol was additionally validated with a 25-seed randomized sweep
   of the healing and lossy-flood scenarios (50 runs, 0 failures); the
   committed tests use fixed seeds and are fully deterministic.
@@ -373,7 +383,7 @@ gap (§10.2).
 | **M3: Bulk transfer** | chunked FETCH sessions with single-chunk tree unicast, per-chunk CRC, base-driven resumption by byte range (§7) **done**; store-and-forward burst pipelining + selective-ACK bitmaps deferred | **done (first cut)** |
 | **M4: Link security** | AES-128-CMAC MIC (RFC 4493 KAT-verified); superframe-bound replay protection (§10.2, needs GPS time to be active in the field); flash key-provisioning workflow (`provision` CLI, one UF2 per fleet) | **done** |
 | **M5: Pico port** | RYLR998 driver + field-node/base examples; GPS/PPS time source (NMEA discipline, scheduler live in the field, absolute ARM windows); flash route cache + root counter persistence (§5.3) | **done** (software; real-air field validation outstanding) |
-| **M6: Base-station tooling** | topology map, retrieval scheduler, fleet checklist/retry policy on the base server (the base_station example CLI is the embryo) | planned |
+| **M6: Base-station tooling** | fleet-wide retrieval mode (§7.4/Q8), campaign engine (`base_policy.[ch]`): mode switch + per-node LIST/FETCH/verify walk with retry budgets, topology-ordered; `retrieve`/`rstat`/`mode` CLI | **done** (first cut; PC-side server + per-branch TDMA remain ideas) |
 
 ## Current caveats (read before fielding)
 
@@ -407,10 +417,11 @@ gap (§10.2).
   relaying with selective-ACK bitmaps (§7.3 in full) is the follow-on;
   `DATA_ACK` is reserved for it.
 - **Bulk needs a bulk window.** With the scheduler on, chunks only move
-  during the §4 bulk window, and neither stock mode defines one — the
-  fleet must be switched to a retrieval mode first (a `mesh_root_fetch`
-  in a mode without a bulk window fails immediately rather than queueing
-  forever). Deciding that policy is §7.4 / M6 work.
+  during the §4 bulk window. The default fleet mode keeps a modest one
+  (ad-hoc `fetch` works); standby has none (a `mesh_root_fetch` there
+  fails immediately rather than queueing forever); `retrieve` handles
+  the real case by switching the fleet into retrieval mode — half the
+  superframe is bulk window — and back (§7.4/Q8, M6).
 - Over the RYLR998's hex transport, frames cap at 120 bytes (§3.4/§8
   Rev B) — irrelevant for control traffic; it is why the default bulk
   chunk is 96 bytes.
@@ -438,20 +449,22 @@ parentheses.
 
 ### Todo
 
-- Bulk-window scheduling policy: who opens the retrieval window and when
-  (§7.4 / §13 Q8)
-- Base-station tooling: topology map, retrieval scheduler, fleet
-  checklist/retry policy on a real computer (M6)
 - Field validation on real air: range, collisions, SF margins (M5)
 - Integrate the mesh into the production logger firmware (SD, sensors,
   §9 state machine)
+- Move campaign policy onto a PC-side base server (the firmware CLI
+  drives it today; a real computer can persist results and schedule
+  overnight retrievals)
 
 ### In progress
 
-- (nothing — M5 landed; M6 base-station tooling is next)
+- (nothing — all six roadmap milestones landed; field validation next)
 
 ### Done
 
+- M6 base-station tooling: fleet retrieval mode (§7.4/Q8), campaign
+  engine with per-node LIST/FETCH/verify + retry budgets,
+  `retrieve`/`rstat`/`mode` CLI
 - M5 GPS time source: NMEA+PPS clock discipline, scheduler live in the
   field, absolute ARM validity windows, replay protection active
 - M5 route persistence: instant post-reboot routing (§5.3) + root

@@ -5,6 +5,7 @@
  * uses 60 s active / 15 min standby); the protocol only cares about
  * epochs, not wall time, so this just makes the tests fast.
  */
+#include "base_policy.h"
 #include "sim_net.h"
 #include "test_util.h"
 
@@ -593,6 +594,107 @@ static void test_root_reboot_recovery(void)
         T_CHECK_EQ(net.last_acked_cmd[i], id);
 }
 
+/* ---- M6: full retrieval campaign driven by the base-policy engine ---- */
+
+static base_policy_t bp;
+static uint8_t bp_buf[4096];
+
+static void bp_hook_data(sim_net_t *s, uint8_t session, uint16_t idx,
+                         const uint8_t *data, uint8_t len)
+{
+    bp_on_bulk_data(&bp, session, idx, data, len, s->now);
+}
+
+static void bp_hook_ack(sim_net_t *s, uint8_t origin, uint16_t cmd_id)
+{
+    (void)s;
+    bp_on_command_ack(&bp, origin, cmd_id);
+}
+
+static void test_retrieval_campaign(void)
+{
+    /* The whole M6 story end to end on the production stack (CMAC MIC,
+     * scheduler, duty cycling): the base-policy engine floods the
+     * fleet into retrieval mode (§7.4/Q8), walks the nodes one at a
+     * time — LIST, parse the index, FETCH, verify the end-to-end CRC —
+     * and switches the fleet back. Loss on every link makes the
+     * re-FETCH machinery earn its keep. */
+    static const uint8_t key[16] = {
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+        0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+    };
+    static mesh_mic_cmac_t cmac;
+    mesh_mic_cmac_init(&cmac, key);
+    mesh_mic_ops_t ops = mesh_mic_cmac_ops(&cmac);
+
+    /* Fleet starts in the default active mode (mode id 0), shrunk to
+     * simulation scale: | beacon 4s | cmd 4s | telem 4s | sleep 8s |.
+     * No bulk window — exactly why the campaign must switch modes. */
+    static mesh_sched_cfg_t sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.enabled = true;
+    sc.guard_us = 100000;
+    sc.mode.period_us = 20000000;
+    sc.mode.beacon_win_us = 4000000;
+    sc.mode.cmd_win_us = 4000000;
+    sc.mode.telem_win_us = 4000000;
+    sc.mode.bulk_win_us = 0;
+    sc.mode.telem_slot_us = 1000000;
+
+    sim_init_opt(&net, 4, 0xF7C4, &ops, &sc);
+    sim_link(&net, 0, 1, 10);
+    sim_link(&net, 1, 2, 10);
+    sim_link(&net, 2, 3, 15);
+    net.bulk_src_len = 700; /* each node's "event" */
+    net.bulk_session = 0xEE; /* keep the sim's own sink out of the way */
+    net.bulk_hook = bp_hook_data;
+    net.ack_hook = bp_hook_ack;
+
+    sim_run(&net, 8 * sc.mode.period_us);
+    T_CHECK(sim_tree_valid(&net));
+
+    /* A fetch in a mode with no bulk window must fail fast (M3). */
+    T_CHECK(!mesh_root_fetch(sim_mesh(&net, 0), 3, 200, 0, 0, 700, 64,
+                             net.now));
+
+    bp_init(&bp, sim_mesh(&net, 0), bp_buf, sizeof(bp_buf));
+    static const uint8_t targets[3] = { 1, 2, 3 };
+    /* Restore to STANDBY — a no-bulk mode — after the campaign, per
+     * the §7.4 policy: the retrieval window exists only while the base
+     * has opened it. */
+    T_CHECK(bp_start(&bp, targets, 3, true, FLEET_MODE_STANDBY,
+                     net.now));
+
+    /* Drive until the campaign completes (bounded virtual time). The
+     * retrieval mode is the library's real 60 s layout, so allow a
+     * generous budget. */
+    unsigned spins = 0;
+    while (bp_busy(&bp) && spins < 900) {
+        sim_run(&net, 1000000);
+        bp_poll(&bp, net.now);
+        spins++;
+    }
+    T_CHECK(!bp_busy(&bp));
+
+    /* Every node retrieved and CRC-verified. */
+    for (unsigned i = 0; i < 3; i++) {
+        T_CHECK(bp.res[i].attempted);
+        T_CHECK(bp.res[i].listed);
+        T_CHECK(bp.res[i].ok);
+        T_CHECK_EQ(bp.res[i].bytes, 700);
+    }
+
+    /* The fleet is back in standby — no bulk window: the same fetch
+     * fails fast again. */
+    T_CHECK(!mesh_root_fetch(sim_mesh(&net, 0), 3, 201, 0, 0, 700, 64,
+                             net.now));
+
+    /* Authenticated + scheduled throughout: no MIC drops anywhere. */
+    for (unsigned i = 0; i < net.n_nodes; i++)
+        T_CHECK_EQ(mesh_stats_get(sim_mesh(&net, (uint8_t)i))->rx_drop_mic,
+                   0);
+}
+
 int main(void)
 {
     T_RUN(test_line3_forms_two_hop_tree);
@@ -607,5 +709,6 @@ int main(void)
     T_RUN(test_bulk_scheduled_and_replay_rejected);
     T_RUN(test_reboot_route_resume);
     T_RUN(test_root_reboot_recovery);
+    T_RUN(test_retrieval_campaign);
     return t_summary();
 }

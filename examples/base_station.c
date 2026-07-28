@@ -22,12 +22,18 @@
  *   fetch <n> [bytes]   retrieve node n's synthetic event window (§7.3)
  *   refetch     re-FETCH from the first missing chunk (resumption)
  *   fstat       fetch progress: chunk bitmap, missing list, final CRC
+ *   retrieve [n]  M6 campaign: switch the fleet to retrieval mode,
+ *               LIST+FETCH+verify every known node (or just n), switch
+ *               back — the §7.4 retrieval scheduler (base_policy.[ch])
+ *   rstat       campaign progress / per-node results
+ *   mode <m>    flood a fleet mode switch (active|standby|retrieval)
  */
 #include <stdio.h>
 #include <string.h>
 
 #include "pico/stdlib.h"
 
+#include "base_policy.h"
 #include "flash_store.h"
 #include "gps_pico.h"
 #include "mesh/mesh.h"
@@ -106,7 +112,13 @@ static struct {
     uint8_t  buf[FETCH_MAX_CHUNKS * MESH_BULK_CHUNK];
 } fx;
 
-static uint8_t next_session = 1; /* session 0 is the LIST convention */
+static uint8_t next_session = 1; /* 1..127 manual; 128+ belongs to the
+                                  * retrieval campaign engine */
+
+/* ---- M6 retrieval campaign (base_policy.[ch]) ---- */
+
+static base_policy_t bp;
+static uint8_t bp_buf[6144];
 
 /* ---- mesh callbacks ---- */
 
@@ -121,6 +133,7 @@ static void on_command_ack(void *user, uint8_t origin, uint16_t cmd_id,
     fleet[origin].acked_cmd = cmd_id;
     fleet[origin].acked_valid = true;
     fleet[origin].last_heard_us = time_us_64();
+    bp_on_command_ack(&bp, origin, cmd_id);
     printf("ACK: node %u executed cmd %u\n", origin, cmd_id);
 }
 
@@ -152,6 +165,12 @@ static void on_bulk_data(void *user, uint8_t session, uint16_t idx,
                          const uint8_t *data, uint8_t len)
 {
     (void)user;
+    if (bp_busy(&bp)) {
+        /* Campaign in flight: sessions 0 and 128+ are its traffic. */
+        bp_on_bulk_data(&bp, session, idx, data, len, app_now());
+        if (session == 0 || session >= 128)
+            return;
+    }
     if (session == 0) {
         /* LIST: the node's recording index streams back as text. */
         printf("INDEX: %.*s\n", (int)len, (const char *)data);
@@ -241,7 +260,7 @@ static void start_fetch(uint8_t node, uint32_t bytes)
     memset(&fx, 0, sizeof(fx));
     fx.target = node;
     fx.session = next_session++;
-    if (next_session == 0)
+    if (next_session >= 128) /* 128+ belongs to the campaign engine */
         next_session = 1;
     fx.chunk = MESH_BULK_CHUNK;
     fx.total = bytes;
@@ -312,6 +331,96 @@ static void print_fstat(void)
     }
     printf("%s — `refetch` resumes from the first gap\n",
            (fx.nchunks - fx.got > 16) ? " ..." : "");
+}
+
+/* ---- M6: retrieval campaign CLI ---- */
+
+/* Tree depth of a node per the telemetry topology map (bounded walk). */
+static unsigned depth_of(uint8_t node)
+{
+    unsigned d = 0;
+    uint8_t at = node;
+    while (at != MESH_ID_ROOT && at != MESH_ID_NONE && d < 16) {
+        at = fleet[at].parent;
+        d++;
+    }
+    return d;
+}
+
+static void start_retrieve(const char *args)
+{
+    uint8_t targets[BP_MAX_NODES];
+    unsigned n = 0;
+
+    unsigned one;
+    if (sscanf(args, "%u", &one) == 1 && one > 0 && one < 255) {
+        targets[n++] = (uint8_t)one;
+    } else {
+        /* All nodes ever seen, nearest-first (§7.4: serialized walk,
+         * shortest paths first so early failures cost least). */
+        for (unsigned d = 1; d <= 16 && n < BP_MAX_NODES; d++) {
+            for (unsigned i = 1; i < FLEET_MAX && n < BP_MAX_NODES;
+                 i++) {
+                if (fleet[i].seen && depth_of((uint8_t)i) == d)
+                    targets[n++] = (uint8_t)i;
+            }
+        }
+    }
+    if (n == 0) {
+        printf("no known nodes (run `status` first, or: retrieve "
+               "<node>)\n");
+        return;
+    }
+
+    /* With GPS/scheduler: full campaign incl. fleet mode switch to
+     * retrieval and back to the default active mode. Bench: transfers
+     * only. */
+    if (!bp_start(&bp, targets, n, use_gps, FLEET_MODE_ACTIVE,
+                  app_now())) {
+        printf("campaign already running (see `rstat`)\n");
+        return;
+    }
+    printf("retrieval campaign: %u node%s%s\n", n, n == 1 ? "" : "s",
+           use_gps ? ", switching fleet to retrieval mode" : "");
+}
+
+static void print_rstat(void)
+{
+    static char out[512];
+    bp_status(&bp, out, sizeof(out));
+    fputs(out, stdout);
+}
+
+static void cmd_mode(const char *args)
+{
+    uint8_t id;
+    if (strncmp(args, "active", 6) == 0)
+        id = FLEET_MODE_ACTIVE;
+    else if (strncmp(args, "standby", 7) == 0)
+        id = FLEET_MODE_STANDBY;
+    else if (strncmp(args, "retrieval", 9) == 0)
+        id = FLEET_MODE_RETRIEVAL;
+    else {
+        printf("usage: mode active|standby|retrieval\n");
+        return;
+    }
+    if (!use_gps) {
+        printf("modes need the scheduler (GPS lock at boot)\n");
+        return;
+    }
+    mesh_sched_mode_t md;
+    fleet_mode_by_id(id, &md);
+    uint64_t at = app_now() + 2 * mesh.sched.mode.period_us;
+    if (!mesh_sched_set_mode(&mesh, &md, at)) {
+        printf("mode switch already pending\n");
+        return;
+    }
+    uint8_t pl[FLEET_MODE_PLEN];
+    fleet_mode_cmd(pl, id, at);
+    flood(pl, sizeof(pl), 0);
+    printf("fleet mode -> %s in %llus (watch the ACK checklist; "
+           "`resend` for stragglers)\n", args,
+           (unsigned long long)((at - app_now()) / 1000000));
 }
 
 static void print_stats(void)
@@ -400,10 +509,16 @@ static void run_cli_line(char *line)
         refetch();
     } else if (strcmp(line, "fstat") == 0) {
         print_fstat();
+    } else if (strncmp(line, "retrieve", 8) == 0) {
+        start_retrieve(line + 8 + (line[8] == ' ' ? 1 : 0));
+    } else if (strcmp(line, "rstat") == 0) {
+        print_rstat();
+    } else if (strncmp(line, "mode ", 5) == 0) {
+        cmd_mode(line + 5);
     } else if (line[0] != '\0') {
         printf("commands: arm [min] | disarm | status | resend | top | "
                "stats | list <n> | fetch <n> [bytes] | refetch | "
-               "fstat | provision\n");
+               "fstat | retrieve [n] | rstat | mode <m> | provision\n");
     }
 }
 
@@ -498,9 +613,7 @@ int main(void)
     };
     if (use_gps) {
         cfg.sched.enabled = true;
-        cfg.sched.mode = mesh_sched_mode_active();
-        cfg.sched.mode.period_us = SCHED_PERIOD_US;
-        cfg.sched.mode.bulk_win_us = SCHED_BULK_WIN_US;
+        fleet_mode_by_id(FLEET_MODE_ACTIVE, &cfg.sched.mode);
     }
     if (!mesh_init(&mesh, &cfg)) {
         printf("mesh_init failed (bad config)\n");
@@ -515,6 +628,8 @@ int main(void)
                         MESH_ROUTE_BLOB_MAX))
         printf("counters: resumed from flash (+margin)\n");
     save_root_counters();
+
+    bp_init(&bp, &mesh, bp_buf, sizeof(bp_buf));
 
     printf("\n=== blast-sensor base station (root) ===\n> ");
 
@@ -532,6 +647,16 @@ int main(void)
             mesh_sched_clock_uncertainty(
                 &mesh, gps_uncertainty_us(&gpsp.gps, local));
         mesh_poll(&mesh, mnow);
+        bp_poll(&bp, mnow);
+        {
+            static bool bp_was_busy;
+            if (bp_was_busy && !bp_busy(&bp)) {
+                printf("retrieval campaign finished:\n");
+                print_rstat();
+                printf("> ");
+            }
+            bp_was_busy = bp_busy(&bp);
+        }
 
         /* Scheduler on: the library beacons at each beacon-window
          * start. Bench mode: application-timed beacons as in M1. */

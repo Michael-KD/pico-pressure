@@ -41,9 +41,13 @@ target_include_directories(test_provision PRIVATE
 mesh_add_test(test_gps unit/test_gps.c ${CMAKE_SOURCE_DIR}/examples/gps.c)
 target_include_directories(test_gps PRIVATE ${CMAKE_SOURCE_DIR}/examples)
 
-mesh_add_test(test_scenarios sim/test_scenarios.c sim/sim_net.c)
+# Scenarios link the examples' base-policy engine (M6) and share the
+# examples' fleet-mode table — both platform-free.
+mesh_add_test(test_scenarios sim/test_scenarios.c sim/sim_net.c
+    ${CMAKE_SOURCE_DIR}/examples/base_policy.c)
 target_include_directories(test_scenarios PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/sim)
+    ${CMAKE_CURRENT_SOURCE_DIR}/sim
+    ${CMAKE_SOURCE_DIR}/examples)
 
 # Interactive demo (not a test): prints tree formation, a command flood,
 # and self-healing on a 10-node fleet.
@@ -52,7 +56,8 @@ target_link_libraries(mesh_demo PRIVATE mesh)
 target_include_directories(mesh_demo PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/sim
-    ${CMAKE_SOURCE_DIR}/src)
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/examples)
 if(NOT MSVC)
     target_compile_options(mesh_demo PRIVATE -Wall -Wextra -Werror -Wshadow)
 endif()

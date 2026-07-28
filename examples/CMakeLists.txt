@@ -82,4 +82,4 @@ endfunction()
 mesh_example(mesh_field_node main.c)
 target_link_libraries(mesh_field_node PRIVATE hardware_adc pico_unique_id)
 
-mesh_example(mesh_base_station base_station.c)
+mesh_example(mesh_base_station base_station.c base_policy.c)

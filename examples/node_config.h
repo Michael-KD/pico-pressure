@@ -51,15 +51,9 @@
 #define GPS_PPS_PIN 2 /* 1PPS output; -1 = not wired */
 #define GPS_WAIT_US (90ull * 1000000)
 
-/* ---- superframe mode once GPS time is available ----
- * The §4 active window layout (beacon 10 s / cmd 20 s / telem 30 s) on
- * a 90 s period with a bulk window so bench retrieval works while
- * scheduled, and a sleep tail that proves duty cycling. MUST be
- * identical on every device: superframe alignment and the replay MIC
- * both bind to it. (M6's commanded retrieval mode supersedes the
- * fixed bulk window for real deployments.) */
-#define SCHED_PERIOD_US   (90ull * 1000000)
-#define SCHED_BULK_WIN_US (20u * 1000000)
+/* The fleet's superframe modes (active/standby/retrieval) live in
+ * fleet_modes.h — one table shared by every device and the simulator,
+ * because superframe alignment and the replay MIC both bind to it. */
 
 /* ---- RYLR998 module settings (same on every device) ---- */
 

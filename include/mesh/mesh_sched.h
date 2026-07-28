@@ -86,6 +86,8 @@ typedef enum {
 /* §4/§11 default modes (window lengths from the design doc). */
 mesh_sched_mode_t mesh_sched_mode_active(void);  /* 60 s superframe */
 mesh_sched_mode_t mesh_sched_mode_standby(void); /* 15 min superframe */
+/* §7.4 retrieval sessions: half the superframe is bulk window. */
+mesh_sched_mode_t mesh_sched_mode_retrieval(void);
 
 /* Switch modes at absolute time `at_us` (must be in the future). The
  * new mode's superframe 0 starts exactly at `at_us`, so a fleet given

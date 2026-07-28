@@ -80,6 +80,13 @@ struct sim_net {
     uint8_t  tap_to;
     uint8_t  tap_len;
     uint8_t  tap_buf[MESH_MAX_FRAME];
+
+    /* Optional scenario hooks, called after the sim's own root-side
+     * bookkeeping — how the M6 base-policy engine plugs into a
+     * simulated fleet. */
+    void (*bulk_hook)(sim_net_t *s, uint8_t session, uint16_t idx,
+                      const uint8_t *data, uint8_t len);
+    void (*ack_hook)(sim_net_t *s, uint8_t origin, uint16_t cmd_id);
 };
 
 /* Create n nodes with IDs 0..n-1 (0 is the root); no links yet. */

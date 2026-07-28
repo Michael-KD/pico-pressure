@@ -157,6 +157,20 @@
 #define MESH_SF_STANDBY_PERIOD_US 900000000ull /* 15 min */
 #endif
 
+/* Retrieval mode (§7.4): half the superframe is bulk window. */
+#ifndef MESH_SF_RETRIEVAL_PERIOD_US
+#define MESH_SF_RETRIEVAL_PERIOD_US 60000000ull /* 60 s */
+#endif
+#ifndef MESH_SF_RETRIEVAL_CMD_WIN_US
+#define MESH_SF_RETRIEVAL_CMD_WIN_US 10000000u /* 10 s */
+#endif
+#ifndef MESH_SF_RETRIEVAL_TELEM_WIN_US
+#define MESH_SF_RETRIEVAL_TELEM_WIN_US 5000000u /* 5 s */
+#endif
+#ifndef MESH_SF_RETRIEVAL_BULK_US
+#define MESH_SF_RETRIEVAL_BULK_US 30000000u /* 30 s */
+#endif
+
 /* Telemetry micro-slot width (§4: ID-ordered slots inside the
  * telemetry window). 30 nodes x 1 s fills the default 30 s window. */
 #ifndef MESH_SF_TELEM_SLOT_US

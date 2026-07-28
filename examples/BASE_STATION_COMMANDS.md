@@ -31,6 +31,9 @@ free-running without the superframe schedule or replay protection.)
 | `fetch <node> [bytes]` | Retrieves the node's event data over the mesh (default 4096 bytes, 96-byte chunks). Progress prints as `DATA: chunk …` lines; on completion the base prints a CRC16 to compare against the node's index line. |
 | `refetch` | Re-requests the current fetch **from the first missing chunk** — the §7.3 resumption mechanism. Chunks already received are kept; repeat until `fstat` says complete. |
 | `fstat` | Fetch progress: chunks received, the missing-chunk list, and the final CRC once complete. |
+| `retrieve [node]` | The M6 **retrieval campaign** (design doc §7.4): floods the fleet into retrieval mode (with GPS/scheduler), then walks every known node — or just the one given — nearest-first: LIST, FETCH, CRC-verify, with automatic gap re-FETCHes; then switches the fleet back and prints per-node results. |
+| `rstat` | Campaign progress: current phase/node/chunks, then one line per node — `OK`, `INCOMPLETE` (gave up after the retry budget), or `NO INDEX` (LIST unanswered/unparseable). |
+| `mode active\|standby\|retrieval` | Floods a fleet mode switch taking effect two superframes out (§4). Watch the ACK checklist like an `arm`; `resend` chases stragglers. Needs GPS/scheduler. |
 | `provision <id> <netid> <key>` | Writes this device's identity + network key to flash and reboots (see below). `provision show` prints what's stored; `provision clear` erases it. |
 
 Anything else prints a one-line usage reminder.
