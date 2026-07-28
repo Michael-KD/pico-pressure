@@ -131,10 +131,10 @@ static uint8_t sim_on_bulk_read(void *user, uint8_t session,
     sim_node_t *n = (sim_node_t *)user;
     sim_net_t *s = n->net;
 
-    if (session == 0) {
-        /* LIST convention: an index line in the same format as the
-         * example field firmware, so the base-policy engine can parse
-         * it (M6). */
+    if (session == 0 || session >= 240) {
+        /* LIST convention (0 = manual, 240+ = campaign engine): an
+         * index line in the same format as the example field firmware,
+         * so the base-policy engine can parse it (M6). */
         char idx[64];
         uint16_t crc = 0xFFFF;
         for (uint32_t o = 0; o < s->bulk_src_len; o++) {

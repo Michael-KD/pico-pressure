@@ -49,9 +49,27 @@ extern "C" {
 #define GPS_UNC_PPS_US   1000u
 #define GPS_UNC_NOPPS_US 400000u
 
-/* An RMC sentence labels the most recent PPS edge only if it follows
- * within this window. */
-#define GPS_PPS_MAX_AGE_US 1500000u
+/* Edge↔sentence association: an RMC labels the newest PPS edge only
+ * when it follows it by a physically plausible gap — at 9600 baud an
+ * RMC alone takes >70 ms to arrive, so a completion <50 ms after an
+ * edge means the sentence belongs to the *previous* second (the new
+ * edge is the next second's top). Beyond the late bound the pairing is
+ * ambiguous and the point is skipped rather than guessed. */
+#define GPS_PPS_MIN_GAP_US 50000u
+#define GPS_PPS_LATE_US    950000u
+
+/* No usable edge for this long = PPS wiring is dead; discipline falls
+ * back to sentence-arrival timing (at its wider uncertainty) instead
+ * of freezing the clock forever. */
+#define GPS_PPS_DEAD_US 5000000u
+
+/* A PPS discipline point that jumps the clock by more than SUSPECT is
+ * either a genuine step (receiver re-fix after outage) or one edge
+ * whose ISR ran late (interrupts held off by a flash write). Genuine
+ * steps repeat identically; a delayed edge does not — so a suspect
+ * offset is held back until a second point agrees within CONFIRM. */
+#define GPS_STEP_SUSPECT_US 5000
+#define GPS_STEP_CONFIRM_US 2000
 
 /* Fix indicator decays if no valid RMC arrives for this long. */
 #define GPS_FIX_TIMEOUT_US 5000000u
@@ -63,19 +81,23 @@ typedef struct {
     bool     in_line;
     /* PPS */
     uint64_t pps_local; /* newest edge; 0 = none */
+    uint64_t pps_prev;  /* the edge before it; 0 = none */
     bool     pps_used;  /* edge already consumed by a discipline point */
     bool     pps_ever;
     /* fix + discipline */
     bool     have_fix;
     bool     disciplined;
+    bool     disc_by_pps;    /* current offset came from a PPS edge */
     int64_t  offset_us;      /* absolute = local + offset */
     uint64_t disc_local;     /* local time of last discipline point */
     uint64_t last_rmc_local; /* local time of last valid RMC */
+    int64_t  cand_offset;    /* suspect step awaiting confirmation */
+    bool     have_cand;
     /* diagnostics */
     uint32_t sentences;   /* checksum-valid sentences */
     uint32_t bad_nmea;    /* framing/checksum rejects */
     uint32_t disciplines; /* offset updates applied */
-    uint32_t steps;       /* updates that moved the clock > 5 ms */
+    uint32_t steps;       /* suspect jumps seen (>5 ms vs held offset) */
 } gps_t;
 
 void gps_init(gps_t *g);

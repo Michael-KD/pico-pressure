@@ -85,6 +85,101 @@ static void test_pps_discipline(void)
     T_CHECK_EQ(g.disciplines, disc);
 }
 
+static void test_edge_association(void)
+{
+    /* A sentence completing <50 ms after an edge cannot describe that
+     * edge (an RMC alone takes >70 ms at 9600 baud): it labels the
+     * PREVIOUS second, and the newest edge is second+1 — the offset
+     * must come out identical either way, never 1 s wrong. */
+    gps_t g;
+    gps_init(&g);
+    gps_on_pps(&g, 10000000);
+    feed(&g, RMC_NOON, 10300000); /* baseline: edge 10.0 = T0 */
+    T_CHECK_EQ(gps_now(&g, 10000000), T0);
+
+    /* Long NMEA burst: the RMC for 12:00:01 lands 20 ms after the
+     * 12:00:02 edge. Same offset must result (edge 12.0 -> T0+2s). */
+    gps_on_pps(&g, 11000000);
+    gps_on_pps(&g, 12000000);
+    feed(&g, "GPRMC,120001.00,A,4807.038,N,01131.000,E,0.0,0.0,"
+             "270726,003.1,W", 12020000);
+    T_CHECK_EQ(g.steps, 0);
+    T_CHECK_EQ(gps_now(&g, 12000000), T0 + 2000000);
+}
+
+static void test_pps_death_fallback(void)
+{
+    /* PPS wiring fails mid-deployment: discipline must degrade to
+     * sentence timing (with its wider reported uncertainty), not
+     * freeze the offset while the crystal drifts. */
+    gps_t g;
+    gps_init(&g);
+    gps_on_pps(&g, 1000000);
+    feed(&g, RMC_NOON, 1200000);
+    T_CHECK(g.disc_by_pps);
+    T_CHECK(gps_uncertainty_us(&g, 1300000) < 3000);
+
+    /* Edges stop; sentences continue. 6 s later the fallback engages
+     * and re-disciplines from sentence arrival. */
+    uint32_t disc = g.disciplines;
+    feed(&g, "GPRMC,120007.00,A,4807.038,N,01131.000,E,0.0,0.0,"
+             "270726,003.1,W", 7100000);
+    T_CHECK(g.disciplines > disc);
+    T_CHECK(!g.disc_by_pps);
+    T_CHECK_EQ(gps_now(&g, 7100000), T0 + 7000000);
+    uint32_t u = gps_uncertainty_us(&g, 7100000);
+    T_CHECK(u >= GPS_UNC_NOPPS_US);
+}
+
+static void test_delayed_edge_rejected(void)
+{
+    /* One PPS edge latched 80 ms late (ISR blocked by a flash write):
+     * the resulting suspect offset must be held back, and the next
+     * healthy second restores normal discipline with no clock step. */
+    gps_t g;
+    gps_init(&g);
+    gps_on_pps(&g, 1000000);
+    feed(&g, RMC_NOON, 1200000);
+    T_CHECK_EQ(gps_now(&g, 1000000), T0);
+
+    /* Edge for 12:00:01 stamped at local 2.080 s instead of 2.000 s. */
+    gps_on_pps(&g, 2080000);
+    feed(&g, "GPRMC,120001.00,A,4807.038,N,01131.000,E,0.0,0.0,"
+             "270726,003.1,W", 2300000);
+    T_CHECK_EQ(g.steps, 1);
+    T_CHECK_EQ(gps_now(&g, 2000000), T0 + 1000000); /* unchanged */
+
+    /* Healthy second: offset still exact, candidate discarded. */
+    gps_on_pps(&g, 3000000);
+    feed(&g, "GPRMC,120002.00,A,4807.038,N,01131.000,E,0.0,0.0,"
+             "270726,003.1,W", 3250000);
+    T_CHECK_EQ(gps_now(&g, 3000000), T0 + 2000000);
+
+    /* A GENUINE step (receiver re-fix 500 ms off) repeats identically
+     * and must be adopted on the second consistent point. */
+    gps_on_pps(&g, 4500000); /* edge now at local 4.5 = 12:00:03 */
+    feed(&g, "GPRMC,120003.00,A,4807.038,N,01131.000,E,0.0,0.0,"
+             "270726,003.1,W", 4700000);
+    T_CHECK_EQ(gps_now(&g, 4500000), T0 + 3500000); /* held: not yet */
+    gps_on_pps(&g, 5500000);
+    feed(&g, "GPRMC,120004.00,A,4807.038,N,01131.000,E,0.0,0.0,"
+             "270726,003.1,W", 5700000);
+    T_CHECK_EQ(gps_now(&g, 5500000), T0 + 4000000); /* adopted */
+}
+
+static void test_uncertainty_stale_local(void)
+{
+    /* Callers may pass a timestamp older than the newest discipline
+     * point (sampled before the pump): must clamp, not wrap to
+     * UINT32_MAX and force always-listen. */
+    gps_t g;
+    gps_init(&g);
+    gps_on_pps(&g, 1000000);
+    feed(&g, RMC_NOON, 1200000);
+    uint32_t u = gps_uncertainty_us(&g, 1199000); /* 1 ms stale */
+    T_CHECK(u < 3000);
+}
+
 static void test_no_pps_discipline(void)
 {
     gps_t g;
@@ -156,5 +251,9 @@ int main(void)
     T_RUN(test_no_pps_discipline);
     T_RUN(test_rejects);
     T_RUN(test_lock_decay_and_freerun);
+    T_RUN(test_edge_association);
+    T_RUN(test_pps_death_fallback);
+    T_RUN(test_delayed_edge_rejected);
+    T_RUN(test_uncertainty_stale_local);
     return t_summary();
 }

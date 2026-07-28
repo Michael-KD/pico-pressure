@@ -48,14 +48,17 @@ void gps_pico_pump(gps_pico_t *gp)
     if (gp != inst)
         return;
 
+    /* Drain queued sentence bytes BEFORE delivering a latched edge: a
+     * sentence that completed before the edge in real time must not be
+     * processed after it, or it would pair with the wrong second (the
+     * core's minimum-gap rule catches the residue). 9600 baud ≈ one
+     * char per ms; the 32-deep FIFO tolerates the loop's pacing. */
+    while (uart_is_readable(GPS_UART))
+        gps_input(&gp->gps, (char)uart_getc(GPS_UART), time_us_64());
+
     uint64_t edge = pps_edge;
     if (edge != 0) {
         pps_edge = 0;
         gps_on_pps(&gp->gps, edge);
     }
-
-    /* 9600 baud ≈ one char per ms; the 32-deep FIFO tolerates the
-     * main loop's pacing comfortably. */
-    while (uart_is_readable(GPS_UART))
-        gps_input(&gp->gps, (char)uart_getc(GPS_UART), time_us_64());
 }

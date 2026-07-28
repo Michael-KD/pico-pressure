@@ -384,8 +384,9 @@ bool mesh_root_fetch(mesh_t *m, uint8_t target, uint8_t session,
  * restarting at seq 0 would look *older* than the fleet's held state
  * and be ignored). Save periodically, well inside the margin. */
 
-/* Worst-case blob size (node role with a full neighbor table). */
-#define MESH_ROUTE_BLOB_MAX (8 + 8 + MESH_MAX_NEIGHBORS * 8 + 2)
+/* Worst-case blob size (node role with a full neighbor table); the
+ * fixed part is header + scheduler mode/alignment + route fields. */
+#define MESH_ROUTE_BLOB_MAX (8 + 36 + 8 + MESH_MAX_NEIGHBORS * 8 + 2)
 
 /* Serialize into buf (>= MESH_ROUTE_BLOB_MAX); returns bytes written,
  * 0 on error. */

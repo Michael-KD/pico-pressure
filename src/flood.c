@@ -74,6 +74,8 @@ uint16_t mesh_root_command(mesh_t *m, uint8_t target,
 
     if (cmd_id == 0) {
         cmd_id = m->next_cmd_id++;
+        if (cmd_id == 0) /* 0 is the auto/error sentinel, never issued */
+            cmd_id = m->next_cmd_id++;
         if (m->next_cmd_id == 0)
             m->next_cmd_id = 1;
     }

@@ -24,7 +24,18 @@ void mesh_beacon_rx(mesh_t *m, const mesh_frame_t *f,
     m->stats.beacons_rx++;
 
     /* Epoch = highest beacon seq seen. Each distinct new epoch counts
-     * as one OBSERVED epoch — the unit of the ETX windows. */
+     * as one OBSERVED epoch — the unit of the ETX windows.
+     *
+     * Resync guard: a beacon whose seq is *far* below our held epoch
+     * cannot be a genuinely stale copy (relays only rebroadcast a few
+     * epochs deep) — it means OUR epoch view is bogus: a restored
+     * flash cache that aged past half the seq space (§5.3), or a base
+     * whose counter blob was lost and restarted near 0. Adopting the
+     * live seq lets the node re-join instead of wedging: its old
+     * neighbor state then reads as stale and is repaired normally. */
+    if (m->have_epoch &&
+        mesh_seq_diff(f->seq, m->net_epoch) <= -(int16_t)MESH_EPOCH_RESYNC)
+        m->have_epoch = false;
     if (!m->have_epoch || mesh_seq_gt(f->seq, m->net_epoch)) {
         m->net_epoch = f->seq;
         m->have_epoch = true;

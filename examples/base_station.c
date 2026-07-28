@@ -31,6 +31,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "hardware/watchdog.h"
 #include "pico/stdlib.h"
 
 #include "base_policy.h"
@@ -166,9 +167,11 @@ static void on_bulk_data(void *user, uint8_t session, uint16_t idx,
 {
     (void)user;
     if (bp_busy(&bp)) {
-        /* Campaign in flight: sessions 0 and 128+ are its traffic. */
+        /* Campaign in flight: sessions 128+ are its traffic (FETCH
+         * 128..239, LIST 240+). Manual session-0 INDEX lines still
+         * print below. */
         bp_on_bulk_data(&bp, session, idx, data, len, app_now());
-        if (session == 0 || session >= 128)
+        if (session >= 128)
             return;
     }
     if (session == 0) {
@@ -202,14 +205,14 @@ static void on_radio_frame(void *ctx, const uint8_t *frame, size_t len,
 
 /* ---- commands ---- */
 
-static void flood(const uint8_t *pl, uint8_t len, uint16_t reuse_id)
+static uint16_t flood(const uint8_t *pl, uint8_t len, uint16_t reuse_id)
 {
     uint64_t now = app_now();
     uint16_t id = mesh_root_command(&mesh, MESH_ID_BROADCAST, pl, len,
                                     reuse_id, now);
     if (id == 0) {
         printf("command failed (queue full?)\n");
-        return;
+        return 0;
     }
     if (id != last_cmd_id) {
         /* Fresh command: reset the checklist. */
@@ -222,6 +225,7 @@ static void flood(const uint8_t *pl, uint8_t len, uint16_t reuse_id)
     mesh_poll(&mesh, now);
     save_root_counters(); /* command IDs must survive a base reboot */
     printf("flooded cmd %u (%u bytes); watching for ACKs\n", id, len);
+    return id;
 }
 
 static void print_top(void)
@@ -408,6 +412,10 @@ static void cmd_mode(const char *args)
         printf("modes need the scheduler (GPS lock at boot)\n");
         return;
     }
+    if (bp_busy(&bp)) {
+        printf("campaign running — it owns the fleet mode (`rstat`)\n");
+        return;
+    }
     mesh_sched_mode_t md;
     fleet_mode_by_id(id, &md);
     uint64_t at = app_now() + 2 * mesh.sched.mode.period_us;
@@ -417,7 +425,13 @@ static void cmd_mode(const char *args)
     }
     uint8_t pl[FLEET_MODE_PLEN];
     fleet_mode_cmd(pl, id, at);
-    flood(pl, sizeof(pl), 0);
+    if (flood(pl, sizeof(pl), 0) == 0) {
+        /* The fleet never heard it: the base must NOT switch alone, or
+         * it desynchronizes from its own network's window schedule. */
+        mesh_sched_cancel_mode(&mesh);
+        printf("mode switch cancelled (flood not sent)\n");
+        return;
+    }
     printf("fleet mode -> %s in %llus (watch the ACK checklist; "
            "`resend` for stragglers)\n", args,
            (unsigned long long)((at - app_now()) / 1000000));
@@ -483,7 +497,11 @@ static void run_cli_line(char *line)
         print_stats();
     } else if (strncmp(line, "list", 4) == 0) {
         unsigned node = 0;
-        if (sscanf(line + 4, "%u", &node) == 1 && node > 0 && node < 255) {
+        if (bp_busy(&bp)) {
+            printf("campaign running — manual transfers would race it "
+                   "(`rstat`)\n");
+        } else if (sscanf(line + 4, "%u", &node) == 1 && node > 0 &&
+                   node < 255) {
             /* LIST = bulk session 0 by convention: the node streams its
              * recording index back as text. (This replaces any fetch
              * session in progress on that node — `refetch` resumes.) */
@@ -500,13 +518,20 @@ static void run_cli_line(char *line)
     } else if (strncmp(line, "fetch", 5) == 0) {
         unsigned node = 0;
         unsigned long bytes = 4096; /* the example nodes' event size */
-        if (sscanf(line + 5, "%u %lu", &node, &bytes) >= 1 && node > 0 &&
-            node < 255)
+        if (bp_busy(&bp))
+            printf("campaign running — manual transfers would race it "
+                   "(`rstat`)\n");
+        else if (sscanf(line + 5, "%u %lu", &node, &bytes) >= 1 &&
+                 node > 0 && node < 255)
             start_fetch((uint8_t)node, (uint32_t)bytes);
         else
             printf("usage: fetch <node> [bytes]\n");
     } else if (strcmp(line, "refetch") == 0) {
-        refetch();
+        if (bp_busy(&bp))
+            printf("campaign running — manual transfers would race it "
+                   "(`rstat`)\n");
+        else
+            refetch();
     } else if (strcmp(line, "fstat") == 0) {
         print_fstat();
     } else if (strncmp(line, "retrieve", 8) == 0) {
@@ -654,8 +679,21 @@ int main(void)
                 printf("retrieval campaign finished:\n");
                 print_rstat();
                 printf("> ");
+                /* The campaign's floods advanced flood_seq well past
+                 * the last save — persist before anything reboots. */
+                save_root_counters();
             }
             bp_was_busy = bp_busy(&bp);
+        }
+
+        /* GPS locked only after the boot window (canyon, canopy):
+         * reboot into scheduled mode rather than staying a MIC-deaf
+         * free-runner in a scheduled fleet. */
+        if (!use_gps && gps_locked(&gpsp.gps, local)) {
+            printf("gps: lock acquired late — rebooting into "
+                   "scheduled mode\n");
+            sleep_ms(50);
+            watchdog_reboot(0, 0, 0);
         }
 
         /* Scheduler on: the library beacons at each beacon-window
@@ -666,9 +704,14 @@ int main(void)
             mesh_poll(&mesh, mnow);
         }
 
-        /* Periodic counter save (10 min — well inside the restore
-         * margin of MESH_PERSIST_SEQ_MARGIN epochs). */
-        if (local >= next_counter_save) {
+        /* Periodic counter save (10 min — far inside the restore
+         * margin of MESH_PERSIST_SEQ_MARGIN seqs, which also covers a
+         * campaign's retry floods between saves). Deferred while
+         * transfers stream: the ~50 ms interrupts-off flash write
+         * would overrun the radio UART FIFO and eat an in-flight
+         * chunk. */
+        if (local >= next_counter_save && !bp_busy(&bp) &&
+            !(fx.active && fx.got < fx.nchunks)) {
             next_counter_save = local + 600000000ull;
             save_root_counters();
         }

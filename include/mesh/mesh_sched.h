@@ -95,6 +95,11 @@ mesh_sched_mode_t mesh_sched_mode_retrieval(void);
 bool mesh_sched_set_mode(struct mesh *m, const mesh_sched_mode_t *mode,
                          uint64_t at_us);
 
+/* Cancel a pending switch — for a base whose mode-change flood failed
+ * to launch: switching alone would desynchronize it from the fleet's
+ * window schedule. No-op when nothing is pending. */
+void mesh_sched_cancel_mode(struct mesh *m);
+
 /* Current segment / superframe index (counted from the current mode's
  * start). Valid only while the scheduler is enabled. */
 mesh_segment_t mesh_sched_segment(const struct mesh *m, uint64_t now_us);

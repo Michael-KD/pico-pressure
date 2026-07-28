@@ -185,11 +185,18 @@
 
 /* ---- Replay protection (§10.2) ----
  * With the scheduler enabled, every frame's MIC binds the transmit-time
- * superframe index; receivers accept the current index ± this tolerance
- * (covers senders straddling a superframe boundary). A recorded frame
- * replayed outside the tolerance fails the MIC statelessly. With the
- * scheduler disabled the index is a constant 0 and replay protection is
- * inactive. */
+ * MIC epoch — absolute time / MESH_MIC_EPOCH_US — and receivers accept
+ * the current epoch ± the tolerance (boundary straddles, deferred
+ * frames). A recorded frame replayed outside that window fails the MIC
+ * statelessly. The epoch is a fleet constant, deliberately independent
+ * of the scheduler mode: binding the mode-local superframe index would
+ * let a missed mode switch partition authentication permanently, and
+ * would widen the replay window to a whole standby period. With the
+ * scheduler disabled the index is a constant 0 and replay protection
+ * is inactive. */
+#ifndef MESH_MIC_EPOCH_US
+#define MESH_MIC_EPOCH_US 60000000ull /* 60 s */
+#endif
 #ifndef MESH_MIC_SF_TOLERANCE
 #define MESH_MIC_SF_TOLERANCE 1
 #endif
@@ -197,10 +204,22 @@
 /* ---- Route persistence (§5.3) ----
  * A rebooted root restores its saved sequence counters advanced by this
  * margin, guaranteeing they are ahead of anything the fleet saw between
- * the last save and the reboot. Save at least once per this many
- * beacon epochs (the examples save every 10 minutes). */
+ * the last save and the reboot. Sized generously: flood seqs advance
+ * on every FETCH (a bench retrieval campaign can flood every few
+ * seconds), and the margin must exceed everything sent between two
+ * saves while staying far below the 32768 wrap horizon. */
 #ifndef MESH_PERSIST_SEQ_MARGIN
-#define MESH_PERSIST_SEQ_MARGIN 64
+#define MESH_PERSIST_SEQ_MARGIN 1024
+#endif
+
+/* A received beacon seq at least this far BELOW the held epoch is not a
+ * stale copy (those are a few epochs old at most) but evidence the
+ * local epoch view is wrong — restored from an over-aged flash blob, or
+ * facing a base whose counters were lost. The node resyncs to the live
+ * seq instead of wedging (§5.3). Must exceed any legitimate reorder
+ * depth and stay well below the restore margin. */
+#ifndef MESH_EPOCH_RESYNC
+#define MESH_EPOCH_RESYNC 64
 #endif
 
 /* ---- Bulk transfer (§7) ----

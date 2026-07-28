@@ -40,12 +40,14 @@ design doc's collection-tree architecture:
   against the RFC test vectors) under a pre-shared network key; frames
   failing the MIC are dropped before parsing. A null stub remains for
   bench/simulator use.
-- **Replay protection** (§10.2): the MIC binds the sender's superframe
-  index — appended to the MIC input, never transmitted, so the wire
-  format is unchanged — sealed at the moment of transmission and
-  verified ±1 superframe by the receiver. A recorded frame replayed
-  later fails the MIC statelessly. Requires the scheduler (a shared GPS
-  clock); without it the index is constant and the binding is inert.
+- **Replay protection** (§10.2): the MIC binds the sender's MIC epoch
+  (absolute time / 60 s) — appended to the MIC input, never
+  transmitted, so the wire format is unchanged — sealed at the moment
+  of transmission and verified ±1 epoch by the receiver. A recorded
+  frame replayed later fails the MIC statelessly, and the epoch is
+  deliberately mode-independent: no missed mode switch or reboot can
+  ever partition authentication. Requires a shared GPS clock; without
+  it the index is constant and the binding is inert.
 - **Neighbor discovery + ETX link estimation** (§5.2): beacon reception
   ratio over a sliding 16-epoch window, EWMA-smoothed, Q8.8 fixed point
   (no floats — the Pico's M0+ has no FPU).

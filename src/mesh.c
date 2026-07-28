@@ -46,6 +46,12 @@ bool mesh_init(mesh_t *m, const mesh_cfg_t *cfg)
     m->path_cost = m->is_root ? 0 : MESH_COST_INF;
     m->hops = m->is_root ? 0 : 0xFF;
     m->next_cmd_id = 1;
+    /* Per-hop unicast seqs start randomized: after a quick reboot the
+     * parent's (src, type, seq) dedup ring still holds last boot's
+     * keys, and a colliding frame would be HOP-ACKed but silently
+     * never relayed. A random origin makes that a ~16/65536 accident
+     * instead of a certainty (§5.3). */
+    m->up_seq = (uint16_t)mesh_rand(m);
 
     /* Scheduler (§4): superframe 0 of the initial mode starts at
      * absolute time 0, so a fleet sharing GPS time is aligned with no
@@ -70,12 +76,16 @@ void mesh_rx(mesh_t *m, const uint8_t *data, size_t len,
     if (!m || !m->initialized || !data)
         return;
 
-    /* With the scheduler on, the MIC binds the sender's transmit-time
-     * superframe index (§10.2); verify against ours ± the straddle
-     * tolerance. Scheduler off: both sides use a constant 0. */
+    /* With the scheduler on (i.e. a fleet-shared absolute clock), the
+     * MIC binds the sender's transmit-time MIC epoch — absolute time /
+     * MESH_MIC_EPOCH_US, deliberately NOT the mode-local superframe
+     * index (§10.2): a mode switch must never be able to partition
+     * authentication, and a node that missed one (or rebooted into the
+     * boot mode) still verifies every frame. Scheduler off: both sides
+     * use a constant 0. */
     uint32_t sf_center = 0, sf_tol = 0;
     if (m->sched.enabled) {
-        sf_center = mesh_sched_superframe(m, now_us);
+        sf_center = (uint32_t)(now_us / MESH_MIC_EPOCH_US);
         sf_tol = MESH_MIC_SF_TOLERANCE;
     }
 

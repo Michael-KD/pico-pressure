@@ -163,6 +163,12 @@ bool mesh_sched_set_mode(mesh_t *m, const mesh_sched_mode_t *mode,
     return true;
 }
 
+void mesh_sched_cancel_mode(mesh_t *m)
+{
+    if (m)
+        m->pending_mode_at = MESH_NO_EVENT;
+}
+
 void mesh_sched_clock_uncertainty(mesh_t *m, uint32_t us)
 {
     if (m)

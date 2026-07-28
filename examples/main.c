@@ -32,6 +32,7 @@
 #include <string.h>
 
 #include "hardware/adc.h"
+#include "hardware/watchdog.h"
 #include "pico/stdlib.h"
 #include "pico/unique_id.h"
 
@@ -156,8 +157,10 @@ static uint8_t on_bulk_read(void *user, uint8_t session, uint32_t off,
     }
 
     uint8_t i = 0;
-    if (session == 0) {
-        /* LIST: one index line; a short read marks its end. */
+    if (session == 0 || session >= 240) {
+        /* LIST (session 0 = CLI, 240+ = campaign engine, see
+         * base_policy.h): one index line; a short read marks its
+         * end. */
         char idx[64];
         int n = snprintf(idx, sizeof(idx), "node %u: evt 1, %u B, "
                          "crc16 %04X", node_id, (unsigned)EVENT_LEN,
@@ -477,11 +480,26 @@ int main(void)
             mesh_poll(&mesh, mnow); /* flush the enqueued report */
         }
 
+        /* GPS locked only after the boot window: reboot into scheduled
+         * mode rather than staying a MIC-deaf free-runner in a
+         * scheduled fleet (the reboot re-locks in seconds — hot
+         * receiver — and the route cache makes rejoining instant). */
+        if (!use_gps && gps_locked(&gpsp.gps, local)) {
+            printf("gps: lock acquired late — rebooting into "
+                   "scheduled mode\n");
+            sleep_ms(50);
+            watchdog_reboot(0, 0, 0);
+        }
+
         /* Route cache write: rare (parent changes only), rate-limited,
-         * and — when scheduled — deferred into the sleep segment so
-         * the ~50 ms interrupts-off flash write can't eat a frame. */
+         * and — when scheduled — preferably deferred into the sleep
+         * segment so the ~50 ms interrupts-off flash write can't eat a
+         * frame. The 5-minute fallback covers modes whose schedule
+         * never sleeps: a never-written cache is worse than one risky
+         * write. */
         if (route_dirty && local - route_saved_at > 60000000ull &&
-            (!use_gps || !mesh_sched_listening(&mesh))) {
+            (!use_gps || !mesh_sched_listening(&mesh) ||
+             local - route_saved_at > 300000000ull)) {
             uint8_t blob[MESH_ROUTE_BLOB_MAX];
             size_t bl = mesh_route_save(&mesh, blob, sizeof(blob));
             if (bl > 0)

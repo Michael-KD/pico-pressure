@@ -143,14 +143,16 @@ static void txq_fire(mesh_t *m, mesh_txq_entry_t *e, uint64_t now)
     if (e->await_hop_ack && e->attempts_left <= MESH_HOP_RETRIES)
         m->stats.hop_retries++; /* any send after the first */
 
-    /* §10.2 replay protection: the MIC binds the *transmit-time*
-     * superframe index, so it is sealed here rather than at enqueue —
-     * entries get deferred into later windows and retries can cross a
-     * superframe boundary, and every send must carry the index the
-     * receiver will verify against (±MESH_MIC_SF_TOLERANCE). */
+    /* §10.2 replay protection: the MIC binds the *transmit-time* MIC
+     * epoch (absolute time / MESH_MIC_EPOCH_US — mode-independent, so
+     * a fleet mid-mode-switch never loses authentication). Sealed here
+     * rather than at enqueue: entries get deferred into later windows
+     * and retries can cross an epoch boundary, and every send must
+     * carry the index the receiver will verify against
+     * (±MESH_MIC_SF_TOLERANCE). */
     if (m->sched.enabled)
         mesh_frame_seal(&m->mic, e->buf, e->len,
-                        mesh_sched_superframe(m, now));
+                        (uint32_t)(now / MESH_MIC_EPOCH_US));
 
     if (m->radio.transmit(m->radio.ctx, e->buf, e->len, MESH_PROFILE_CONTROL))
         m->stats.tx_frames++;

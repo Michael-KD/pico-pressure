@@ -16,6 +16,7 @@ void gps_init(gps_t *g)
 
 void gps_on_pps(gps_t *g, uint64_t local_us)
 {
+    g->pps_prev = g->pps_local;
     g->pps_local = local_us;
     g->pps_used = false;
     g->pps_ever = true;
@@ -97,17 +98,41 @@ static bool parse_rmc_time(const char *tim, const char *date,
     return true;
 }
 
-static void apply_offset(gps_t *g, int64_t new_offset, uint64_t local_us)
+static void apply_offset(gps_t *g, int64_t new_offset, uint64_t local_us,
+                         bool by_pps)
 {
-    if (g->disciplined) {
-        int64_t delta = new_offset - g->offset_us;
-        if (delta > 5000 || delta < -5000)
-            g->steps++;
-    }
     g->offset_us = new_offset;
     g->disciplined = true;
+    g->disc_by_pps = by_pps;
     g->disc_local = local_us;
     g->disciplines++;
+}
+
+/* PPS-grade discipline with delayed-edge rejection: an edge whose ISR
+ * ran late (interrupts held off by a flash write) produces one offset
+ * jump that the next healthy second contradicts, while a genuine clock
+ * step (receiver re-fix) repeats identically — so a suspect jump is
+ * parked until a second point agrees with it. */
+static void pps_offset(gps_t *g, int64_t new_offset, uint64_t local_us)
+{
+    if (g->disciplined && g->disc_by_pps) {
+        int64_t d = new_offset - g->offset_us;
+        if (d > GPS_STEP_SUSPECT_US || d < -GPS_STEP_SUSPECT_US) {
+            int64_t cd = new_offset - g->cand_offset;
+            g->steps++;
+            if (g->have_cand &&
+                cd <= GPS_STEP_CONFIRM_US && cd >= -GPS_STEP_CONFIRM_US) {
+                g->have_cand = false; /* confirmed: a real step */
+                apply_offset(g, new_offset, local_us, true);
+            } else {
+                g->cand_offset = new_offset;
+                g->have_cand = true;
+            }
+            return;
+        }
+        g->have_cand = false;
+    }
+    apply_offset(g, new_offset, local_us, true);
 }
 
 static void process_rmc(gps_t *g, char *body, uint64_t local_us)
@@ -134,20 +159,43 @@ static void process_rmc(gps_t *g, char *body, uint64_t local_us)
     g->have_fix = true;
     g->last_rmc_local = local_us;
 
-    if (g->pps_ever && !g->pps_used && g->pps_local != 0 &&
-        local_us - g->pps_local < GPS_PPS_MAX_AGE_US) {
-        /* The edge marked the top of the second this sentence labels. */
-        g->pps_used = true;
-        apply_offset(g, (int64_t)(rmc_us - frac) - (int64_t)g->pps_local,
-                     local_us);
-    } else if (!g->pps_ever) {
+    uint64_t whole = rmc_us - frac; /* top of the labeled second */
+    if (g->pps_ever && g->pps_local != 0) {
+        uint64_t gap = local_us - g->pps_local;
+        if (!g->pps_used && gap >= GPS_PPS_MIN_GAP_US &&
+            gap <= GPS_PPS_LATE_US) {
+            /* Normal case: the newest edge marked the top of the second
+             * this sentence labels. */
+            g->pps_used = true;
+            pps_offset(g, (int64_t)whole - (int64_t)g->pps_local,
+                       local_us);
+        } else if (!g->pps_used && gap < GPS_PPS_MIN_GAP_US &&
+                   g->pps_prev != 0 &&
+                   local_us - g->pps_prev <=
+                       GPS_PPS_LATE_US + 1000000u) {
+            /* The sentence squeaked in just after the NEXT second's
+             * edge (long NMEA burst at 9600 baud, or pump ordering):
+             * physically it cannot describe an edge <50 ms old, so the
+             * newest edge is second+1 — which labels it just as well. */
+            g->pps_used = true;
+            pps_offset(g, (int64_t)(whole + 1000000u) -
+                              (int64_t)g->pps_local,
+                       local_us);
+        } else if (gap > GPS_PPS_DEAD_US) {
+            /* PPS died mid-deployment (wiring): degrade to sentence
+             * timing rather than freezing the clock while the crystal
+             * drifts. Uncertainty reporting downgrades with it. */
+            apply_offset(g, (int64_t)rmc_us - (int64_t)local_us,
+                         local_us, false);
+        }
+        /* else: ambiguous pairing — skip; next second disciplines. */
+    } else {
         /* No PPS wired: sentence completion labels the reported time,
          * to within the receiver's output latency (covered by the
          * larger GPS_UNC_NOPPS_US). */
-        apply_offset(g, (int64_t)rmc_us - (int64_t)local_us, local_us);
+        apply_offset(g, (int64_t)rmc_us - (int64_t)local_us, local_us,
+                     false);
     }
-    /* PPS wired but this sentence missed its edge: skip — the next
-     * labeled edge disciplines. */
 }
 
 static void process_line(gps_t *g, uint64_t local_us)
@@ -230,9 +278,17 @@ uint32_t gps_uncertainty_us(const gps_t *g, uint64_t local_us)
 {
     if (!g->disciplined)
         return UINT32_MAX;
-    uint64_t elapsed = local_us - g->disc_local;
+    /* Callers may hold a timestamp sampled just before the pump that
+     * produced the newest discipline point; clamp instead of letting
+     * the subtraction wrap to ~2^64 (which read as "always listen"). */
+    uint64_t elapsed = (local_us > g->disc_local)
+                           ? local_us - g->disc_local
+                           : 0;
     uint64_t drift = elapsed * GPS_DRIFT_PPM / 1000000u;
-    uint64_t base = g->pps_ever ? GPS_UNC_PPS_US : GPS_UNC_NOPPS_US;
+    /* Grade by how the CURRENT offset was obtained, not by whether a
+     * PPS edge was ever seen — a sentence-timed offset is ±400 ms even
+     * on a PPS-wired node whose first edge hasn't paired yet. */
+    uint64_t base = g->disc_by_pps ? GPS_UNC_PPS_US : GPS_UNC_NOPPS_US;
     uint64_t total = base + drift;
     return (total > UINT32_MAX) ? UINT32_MAX : (uint32_t)total;
 }

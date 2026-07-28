@@ -476,16 +476,17 @@ static void test_bulk_scheduled_and_replay_rejected(void)
                    0);
 
     /* Replay: record a frame the fleet really delivered, wait three
-     * superframes, and inject the identical bytes at the same
-     * receiver. The MIC binds the transmit-time superframe index, so
-     * it must be rejected outright. */
+     * MIC epochs (the MIC binds absolute time / MESH_MIC_EPOCH_US —
+     * mode-independent, so a mode switch can never partition
+     * authentication), and inject the identical bytes at the same
+     * receiver. It must be rejected outright. */
     uint8_t replay[MESH_MAX_FRAME];
     uint8_t rlen = net.tap_len;
     uint8_t rto = net.tap_to;
     memcpy(replay, net.tap_buf, rlen);
     T_CHECK(rlen > 0);
 
-    sim_run(&net, 3 * sf);
+    sim_run(&net, 3 * MESH_MIC_EPOCH_US);
     mesh_t *victim = sim_mesh(&net, rto);
     uint32_t drops_before = mesh_stats_get(victim)->rx_drop_mic;
     uint32_t frames_before = mesh_stats_get(victim)->rx_frames;
@@ -611,6 +612,40 @@ static void bp_hook_ack(sim_net_t *s, uint8_t origin, uint16_t cmd_id)
     bp_on_command_ack(&bp, origin, cmd_id);
 }
 
+static void test_epoch_resync(void)
+{
+    /* §5.3 resync guard: a node whose held epoch is bogus — a flash
+     * blob that aged past half the seq space, or a base whose counter
+     * blob was lost — sees live beacons as impossibly old. Anything
+     * MESH_EPOCH_RESYNC below the held epoch triggers re-adoption of
+     * the live seq instead of wedging forever. */
+    sim_init(&net, 3, 0x35EC);
+    sim_link(&net, 0, 1, 0);
+    sim_link(&net, 1, 2, 0);
+    for (int e = 0; e < 5; e++)
+        sim_epoch(&net, SF);
+    T_CHECK(sim_tree_valid(&net));
+
+    /* Simulate an over-aged restored epoch view on node 1. */
+    mesh_t *n1 = sim_mesh(&net, 1);
+    uint16_t real = n1->net_epoch;
+    n1->net_epoch = (uint16_t)(real + 2000);
+
+    /* Small negative diffs (a genuinely stale relay copy) must NOT
+     * resync — inject a beacon one epoch old: ignored. */
+    for (int e = 0; e < 2; e++)
+        sim_epoch(&net, SF);
+    T_CHECK(mesh_seq_gt(sim_mesh(&net, 0)->beacon_seq, real));
+
+    /* The live beacons sit ~2000 below node 1's held epoch: resync
+     * must have re-adopted the live seq and kept the tree usable. */
+    T_CHECK_EQ(n1->net_epoch, sim_mesh(&net, 0)->beacon_seq);
+    for (int e = 0; e < 4; e++)
+        sim_epoch(&net, SF);
+    T_CHECK(sim_tree_valid(&net));
+    T_CHECK(mesh_parent(n1) != MESH_ID_NONE);
+}
+
 static void test_retrieval_campaign(void)
 {
     /* The whole M6 story end to end on the production stack (CMAC MIC,
@@ -645,7 +680,10 @@ static void test_retrieval_campaign(void)
     sim_link(&net, 0, 1, 10);
     sim_link(&net, 1, 2, 10);
     sim_link(&net, 2, 3, 15);
-    net.bulk_src_len = 700; /* each node's "event" */
+    /* 4096-byte events: the index line ("... 4096 B, crc16 XXXX") is
+     * longer than one 32-byte chunk — the regression that once
+     * truncated the parsed CRC mid-field. */
+    net.bulk_src_len = 4096;
     net.bulk_session = 0xEE; /* keep the sim's own sink out of the way */
     net.bulk_hook = bp_hook_data;
     net.ack_hook = bp_hook_ack;
@@ -669,7 +707,7 @@ static void test_retrieval_campaign(void)
      * retrieval mode is the library's real 60 s layout, so allow a
      * generous budget. */
     unsigned spins = 0;
-    while (bp_busy(&bp) && spins < 900) {
+    while (bp_busy(&bp) && spins < 1500) {
         sim_run(&net, 1000000);
         bp_poll(&bp, net.now);
         spins++;
@@ -681,7 +719,7 @@ static void test_retrieval_campaign(void)
         T_CHECK(bp.res[i].attempted);
         T_CHECK(bp.res[i].listed);
         T_CHECK(bp.res[i].ok);
-        T_CHECK_EQ(bp.res[i].bytes, 700);
+        T_CHECK_EQ(bp.res[i].bytes, 4096);
     }
 
     /* The fleet is back in standby — no bulk window: the same fetch
@@ -709,6 +747,7 @@ int main(void)
     T_RUN(test_bulk_scheduled_and_replay_rejected);
     T_RUN(test_reboot_route_resume);
     T_RUN(test_root_reboot_recovery);
+    T_RUN(test_epoch_resync);
     T_RUN(test_retrieval_campaign);
     return t_summary();
 }

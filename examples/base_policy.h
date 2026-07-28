@@ -41,6 +41,14 @@ extern "C" {
 #define BP_MODE_REFLOODS 3
 #define BP_FETCH_RETRIES 6
 
+/* Session-space convention (an example-fleet convention, like command
+ * opcodes): 0 = the CLI's LIST; 1..127 = manual CLI fetches;
+ * 128..239 = campaign FETCH sessions; 240..254 = campaign LIST
+ * sessions, a fresh id per node so a late chunk from the previous
+ * node's index can never contaminate the current one. Field nodes
+ * serve the recording index for 0 and for 240+. */
+#define BP_LIST_SESSION0 240
+
 typedef enum {
     BP_IDLE = 0,
     BP_MODE_IN,  /* switching the fleet into retrieval mode */
@@ -75,7 +83,7 @@ typedef struct {
 
     /* mode-switch phase */
     uint16_t mode_cmd_id;
-    uint64_t mode_at;      /* effective time of the pending switch */
+    uint64_t mode_at;      /* effective time; 0 = not yet launched */
     uint8_t  mode_id;      /* mode being switched to */
     uint8_t  refloods_left;
     uint32_t acked_mask;   /* bit i: nodes[i] ACKed the mode command */
@@ -83,7 +91,8 @@ typedef struct {
 
     /* transfer state (LIST and FETCH share the machinery) */
     uint8_t  session;
-    uint8_t  next_session; /* allocator, 128..254 (manual CLI uses low) */
+    uint8_t  next_session;  /* FETCH allocator, 128..239 */
+    uint8_t  list_counter;  /* LIST allocator offset above 240 */
     uint8_t  chunk;
     uint32_t total;
     unsigned nchunks;
@@ -91,7 +100,7 @@ typedef struct {
     unsigned got;
     uint64_t last_progress_us;
     char     list_text[96];
-    uint8_t  list_got;
+    bool     list_eof; /* short chunk seen: index text is complete */
 } base_policy_t;
 
 void bp_init(base_policy_t *p, mesh_t *m, uint8_t *buf,

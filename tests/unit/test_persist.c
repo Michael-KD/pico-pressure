@@ -171,6 +171,56 @@ static void test_root_counters(void)
     T_CHECK(mesh_seq_gt(r2.beacon_seq, 510));
 }
 
+static void test_sched_mode_restored(void)
+{
+    /* The blob carries the commanded mode + alignment origin: a node
+     * rebooting after a fleet mode switch must resume the fleet's
+     * schedule, not the boot default — its windows (and its idea of
+     * when to listen) would otherwise be misaligned until the next
+     * commanded switch. */
+    static mesh_t a, b;
+    mesh_cfg_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.node_id = 7;
+    cfg.network_id = 0xD5E7;
+    cfg.radio.transmit = tx_ok;
+    cfg.rng_seed = 42;
+    cfg.sched.enabled = true;
+    cfg.sched.mode = mesh_sched_mode_active();
+    mesh_init(&a, &cfg);
+
+    /* The fleet was commanded into retrieval mode at t=5000s. */
+    a.sched.mode = mesh_sched_mode_retrieval();
+    a.mode_start_us = 5000ull * 1000000;
+    a.nbrs[0].in_use = true;
+    a.nbrs[0].ever_beacon = true;
+    a.nbrs[0].id = 2;
+    a.nbrs[0].etx_q8 = 300;
+    a.parent = 2;
+    a.path_cost = 500;
+    a.hops = 1;
+
+    uint8_t blob[MESH_ROUTE_BLOB_MAX];
+    size_t len = mesh_route_save(&a, blob, sizeof(blob));
+    T_CHECK(len > 0);
+
+    mesh_init(&b, &cfg); /* boots into the default active mode */
+    T_CHECK(mesh_route_load(&b, blob, len));
+    T_CHECK_EQ(b.sched.mode.period_us,
+               mesh_sched_mode_retrieval().period_us);
+    T_CHECK_EQ(b.sched.mode.bulk_win_us,
+               mesh_sched_mode_retrieval().bulk_win_us);
+    T_CHECK_EQ(b.mode_start_us, 5000ull * 1000000);
+
+    /* A scheduler-off boot ignores the blob's schedule but still
+     * restores the route. */
+    static mesh_t c;
+    init_node(&c, 7);
+    T_CHECK(mesh_route_load(&c, blob, len));
+    T_CHECK(!c.sched.enabled);
+    T_CHECK_EQ(c.parent, 2);
+}
+
 static void test_unattached_save(void)
 {
     /* A never-attached node's blob restores neighbors but no parent. */
@@ -195,6 +245,7 @@ int main(void)
     T_RUN(test_node_roundtrip);
     T_RUN(test_node_rejections);
     T_RUN(test_root_counters);
+    T_RUN(test_sched_mode_restored);
     T_RUN(test_unattached_save);
     return t_summary();
 }
