@@ -43,6 +43,19 @@ size_t mesh_frame_build(uint16_t net_id, const mesh_mic_ops_t *mic,
                         uint8_t type, uint8_t src, uint8_t dst,
                         uint16_t seq, uint8_t ttl,
                         const uint8_t *payload, uint8_t plen);
+/* Recompute the MIC trailer of a built frame, binding `sf_index` into
+ * the MIC input (§10.2 replay protection). Called by the TX queue at
+ * fire time; build seals with index 0. */
+void mesh_frame_seal(const mesh_mic_ops_t *mic, uint8_t *buf, size_t len,
+                     uint32_t sf_index);
+/* Verify against sf_center first, then ±d out to sf_tol (superframe
+ * boundary straddles). The plain mesh_frame_parse wrapper is the
+ * scheduler-off form: index 0, tolerance 0. */
+mesh_frame_rc_t mesh_frame_parse_sf(uint16_t net_id,
+                                    const mesh_mic_ops_t *mic,
+                                    const uint8_t *buf, size_t len,
+                                    uint32_t sf_center, uint32_t sf_tol,
+                                    mesh_frame_t *out);
 mesh_frame_rc_t mesh_frame_parse(uint16_t net_id, const mesh_mic_ops_t *mic,
                                  const uint8_t *buf, size_t len,
                                  mesh_frame_t *out);
@@ -99,7 +112,9 @@ bool mesh_txq_on_hop_ack(mesh_t *m, uint8_t from, uint8_t type,
 #define MESH_WIN_BULK   4
 
 /* Earliest time >= now at which `win` may transmit (now when the window
- * is open or the scheduler is disabled). */
+ * is open or the scheduler is disabled). MESH_NO_EVENT if the current
+ * mode gives the window zero width — it will never open, and a queued
+ * frame in that class must be dropped, not deferred. */
 uint64_t mesh_sched_gate(mesh_t *m, uint8_t win, uint64_t now);
 /* Sanity-check a mode (windows fit the period, slot fits the window). */
 bool mesh_sched_mode_valid(const mesh_sched_mode_t *md);
@@ -159,5 +174,16 @@ void mesh_hop_ack_rx(mesh_t *m, const mesh_frame_t *f);
 
 /* ---- telemetry.c ---- */
 void mesh_telem_deliver_root(mesh_t *m, const mesh_frame_t *f);
+
+/* ---- bulk.c (§7.3 bulk retrieval, first cut) ----
+ * (mesh_crc16 is declared in mesh.h — public for app-side checks.) */
+/* A targeted FETCH (SESSION frame) arrived for this node. */
+void mesh_bulk_fetch_execute(mesh_t *m, const mesh_frame_t *f,
+                             uint64_t now);
+/* Advance the source session: emit the next chunk once the previous
+ * one has resolved. Called from mesh_poll (and on FETCH receipt). */
+void mesh_bulk_pump(mesh_t *m, uint64_t now);
+/* Root: CRC-check a received DATA chunk and deliver it to the app. */
+void mesh_bulk_deliver_root(mesh_t *m, const mesh_frame_t *f);
 
 #endif /* MESH_INTERNAL_H */

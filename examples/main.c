@@ -10,13 +10,18 @@
  * What is deliberately simplified relative to the production firmware:
  *   - Time: time_us_64() (µs since boot) instead of GPS-disciplined
  *     absolute time. The mesh only needs a monotonic local clock, but
- *     the library's superframe scheduler (§4, milestone M2) needs a
- *     fleet-shared timebase, so cfg.sched stays disabled here until
- *     the GPS/PPS time source lands (M5). Likewise ARM carries a
- *     duration instead of an absolute validity window.
+ *     the library's superframe scheduler (§4) needs a fleet-shared
+ *     timebase, so cfg.sched stays disabled here until the GPS/PPS
+ *     time source lands (M5). Two consequences: ARM carries a duration
+ *     instead of an absolute validity window, and the superframe-bound
+ *     replay protection of §10.2 is inert (frames are authenticated,
+ *     but a recording could be replayed) until that same clock exists.
  *   - Sensors: the ARMED state toggles a flag and the LED; the 1 kHz
  *     pressure pipeline, SD logging, and the full §9 state machine live
  *     in the logger application, not in this example.
+ *   - Stored data: bulk FETCH (§7) serves a deterministic synthetic
+ *     trace instead of real event windows off the SD card, so
+ *     retrieval can be exercised and CRC-verified on the bench.
  *
  * Set NODE_ID in node_config.h (unique per device!) before flashing.
  * Logs go to USB serial.
@@ -75,6 +80,66 @@ static void send_telemetry(uint64_t now)
                pl[0], pl[1] / 10, pl[1] % 10, (int8_t)pl[2]);
     else
         printf("telem: skipped (no parent yet)\n");
+}
+
+/* ---- synthetic "recording" served over bulk FETCH (§7.3) ----
+ * The production firmware serves real event windows off the SD card
+ * (LIST index -> byte ranges). This example serves a deterministic
+ * 4 kB synthetic trace so retrieval can be exercised — and verified by
+ * CRC — on the bench. Session 0 is the LIST convention: it returns the
+ * recording index as text. */
+
+#define EVENT_LEN 4096u
+
+static uint8_t event_byte(uint32_t off)
+{
+    return (uint8_t)(0x80 ^ (uint8_t)(NODE_ID * 37) ^
+                     (uint8_t)(off * 13) ^ (uint8_t)(off >> 5));
+}
+
+/* CRC16 of the whole synthetic event, computed without a 4 kB buffer
+ * (same CRC-16/CCITT-FALSE as the library's per-chunk mesh_crc16). */
+static uint16_t event_crc16(void)
+{
+    uint16_t crc = 0xFFFF;
+    for (uint32_t o = 0; o < EVENT_LEN; o++) {
+        crc ^= (uint16_t)((uint16_t)event_byte(o) << 8);
+        for (int b = 0; b < 8; b++)
+            crc = (crc & 0x8000) ? (uint16_t)((crc << 1) ^ 0x1021)
+                                 : (uint16_t)(crc << 1);
+    }
+    return crc;
+}
+
+static uint8_t on_bulk_read(void *user, uint8_t session, uint32_t off,
+                            uint8_t *buf, uint8_t max)
+{
+    (void)user;
+    static uint8_t noisy_session = 0xFF;
+    if (session != noisy_session) {
+        noisy_session = session;
+        printf("bulk: serving session %u (event crc16 %04X)\n", session,
+               event_crc16());
+    }
+
+    uint8_t i = 0;
+    if (session == 0) {
+        /* LIST: one index line; a short read marks its end. */
+        char idx[64];
+        int n = snprintf(idx, sizeof(idx), "node %u: evt 1, %u B, "
+                         "crc16 %04X", NODE_ID, (unsigned)EVENT_LEN,
+                         event_crc16());
+        while (i < max && off + i < (uint32_t)n) {
+            buf[i] = (uint8_t)idx[off + i];
+            i++;
+        }
+        return i;
+    }
+    while (i < max && off + i < EVENT_LEN) {
+        buf[i] = event_byte(off + i);
+        i++;
+    }
+    return i;
 }
 
 /* ---- mesh callbacks ---- */
@@ -187,6 +252,7 @@ int main(void)
         .cb = {
             .on_command = on_command,
             .on_parent_change = on_parent_change,
+            .on_bulk_read = on_bulk_read,
         },
         .rng_seed = seed ? seed : 1,
     };
@@ -227,6 +293,8 @@ int main(void)
         }
 
         led_tick(now);
-        sleep_us(500); /* M2 replaces this with scheduled sleep */
+        /* Busy loop: with the scheduler enabled (M5, once GPS lands)
+         * this becomes a sleep until mesh_poll's returned deadline. */
+        sleep_us(500);
     }
 }

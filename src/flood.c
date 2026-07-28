@@ -1,11 +1,15 @@
 /*
- * flood.c — controlled flooding for commands (§6).
+ * flood.c — controlled flooding for commands (§6) and FETCH requests
+ * (SESSION frames, §7.3), which share the relay/dedup machinery and
+ * the root's flood_seq space.
  *
  * Frame-level dedup is on the frame sequence number, which the root
  * increments on every flood transmission (including re-floods of the
  * same command). Execution-level dedup is on the command ID carried in
  * the payload, handled in command.c — so a re-flood propagates through
- * the whole network again but is executed at most once per node.
+ * the whole network again but is executed at most once per node. FETCH
+ * needs no execution dedup: re-executing one is the §7.3 resumption
+ * mechanism.
  */
 #include "mesh_internal.h"
 
@@ -25,18 +29,21 @@ bool mesh_flood_seen(mesh_t *m, uint16_t seq)
 
 void mesh_flood_rx(mesh_t *m, const mesh_frame_t *f, uint64_t now)
 {
-    if (f->plen < MESH_CMD_HDR)
+    uint8_t min_plen = (f->type == MESH_FT_SESSION) ? MESH_FETCH_PLEN
+                                                    : MESH_CMD_HDR;
+    if (f->plen < min_plen)
         return;
     if (mesh_flood_seen(m, f->seq))
         return; /* duplicate (or our own echo at the root) */
-    m->stats.cmds_seen++;
+    if (f->type == MESH_FT_CMD)
+        m->stats.cmds_seen++;
 
-    /* Relay: targeted commands are still relayed by every node (§6.3).
+    /* Relay: targeted floods are still relayed by every node (§6.3).
      * The root never relays — it originated the flood. */
     if (!m->is_root && f->ttl > 1) {
         uint8_t buf[MESH_MAX_FRAME];
         size_t len = mesh_frame_build(m->network_id, &m->mic, buf,
-                                      MESH_FT_CMD, m->node_id, f->dst,
+                                      f->type, m->node_id, f->dst,
                                       f->seq, (uint8_t)(f->ttl - 1),
                                       f->payload, f->plen);
         uint64_t due = now + mesh_rand_below(m, MESH_FLOOD_BACKOFF_US);
@@ -44,9 +51,16 @@ void mesh_flood_rx(mesh_t *m, const mesh_frame_t *f, uint64_t now)
             m->stats.floods_relayed++;
     }
 
-    if (!m->is_root &&
-        (f->dst == MESH_ID_BROADCAST || f->dst == m->node_id))
-        mesh_cmd_execute(m, f, now);
+    if (m->is_root)
+        return;
+    if (f->type == MESH_FT_CMD) {
+        if (f->dst == MESH_ID_BROADCAST || f->dst == m->node_id)
+            mesh_cmd_execute(m, f, now);
+    } else if (f->dst == m->node_id) {
+        /* FETCH is always targeted — a broadcast FETCH would set every
+         * node streaming at once and is ignored. */
+        mesh_bulk_fetch_execute(m, f, now);
+    }
 }
 
 uint16_t mesh_root_command(mesh_t *m, uint8_t target,

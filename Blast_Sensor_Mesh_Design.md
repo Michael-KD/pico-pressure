@@ -5,14 +5,14 @@
 
 **Scope:** network architecture, routing, command dissemination, and bulk data retrieval for 2–30 solar-powered sensor nodes with GPS time reference. Implementation details (firmware structure, driver code) are out of scope, but Revision B folds back what implementing and simulating the core mesh taught us.
 
-**Implementation status:** the core mesh (§5, §6, §8, the MIC of §10.2, and the §4 superframe scheduler) is implemented as the radio-agnostic C library at the root of this repository, validated on a host simulator (fixed-seed scenario tests plus 25-seed randomized sweeps) — see `README.md`. Bulk transfer (§7) is design-only as of this revision.
+**Implementation status:** the core mesh (§5, §6, §8, the §4 superframe scheduler, and §10.2 in full — AES-CMAC MIC *with* superframe-bound replay protection) is implemented as the radio-agnostic C library at the root of this repository, validated on a host simulator (fixed-seed scenario tests plus randomized sweeps) — see `README.md`. Bulk transfer (§7) is implemented in its first cut: chunked FETCH sessions with single-chunk tree unicast and base-driven resumption; the store-and-forward burst pipeline of §7.3 remains design-only.
 
 ### Revision History
 
 | Rev | Date | Changes |
 |---|---|---|
 | A | July 2026 | Initial protocol design. |
-| B | July 2026 | Findings from the M1 implementation: observed-epoch ETX windows and estimator restart (§5.2), HOP-ACK frame type and per-hop seq semantics (§6.4, §8), two-level flood dedup — per-transmission seq vs. persistent command ID (§6), MIC implemented as AES-128-CMAC with replay protection still open (§10.2), REYAX RYLR998 selected as the first radio module with its transport constraints (§3.4), tunables table extended (§11). Amended after M2: §4 implementation notes (alignment origin, window discipline, guard margins, micro-slots); §10.2/§13 replay plan re-anchored to the now-available superframe index. |
+| B | July 2026 | Findings from the M1 implementation: observed-epoch ETX windows and estimator restart (§5.2), HOP-ACK frame type and per-hop seq semantics (§6.4, §8), two-level flood dedup — per-transmission seq vs. persistent command ID (§6), MIC implemented as AES-128-CMAC with replay protection still open (§10.2), REYAX RYLR998 selected as the first radio module with its transport constraints (§3.4), tunables table extended (§11). Amended after M2: §4 implementation notes (alignment origin, window discipline, guard margins, micro-slots); §10.2/§13 replay plan re-anchored to the now-available superframe index. Amended after M3: §7.3 first-cut implementation notes (single-chunk tree unicast, byte-range FETCH, base-driven resumption); §10.2 replay protection **implemented** — superframe-bound MIC sealed at transmit time, verified ±1 (§13 Q6 resolved). |
 
 ---
 
@@ -234,6 +234,16 @@ During recording, the node runs a trigger detector (pressure threshold with conf
 4. **Completion:** the base assembles chunks, checks per-chunk CRCs, then requests any missing indices with a NACK bitmap (repeat until complete), and finally verifies the file CRC32. On mismatch, re-fetch only the suspect byte range.
 5. **Resumption:** session state (session ID, bitmap of received chunks) lives at the base. After any interruption — node reboot, link loss, operator pause — the base re-issues FETCH with the same session ID and its current NACK bitmap; the source resends only what is missing.
 
+**Implementation notes (M3, first cut).** The shipped implementation delivers the retrieval path end to end, deferring only the burst pipeline:
+
+- **Single-chunk tree unicast instead of bursts.** Chunks ride the existing per-hop-reliable tree unicast of §6.4 — one chunk in flight at a time, each HOP-ACKed hop by hop — rather than W-chunk bursts with per-hop selective-ACK bitmaps. This reuses proven machinery and needs no relay RAM buffers at all: a relay forwards a chunk exactly as it forwards a CMD-ACK, so the §7.3 step-3 store-and-forward budget (W × C ≈ 3 kB per active session) drops to zero in this cut. The cost is throughput: each chunk pays a round trip per hop instead of pipelining, which is acceptable at the §1.1 latency requirement (minutes–hours) and is the first thing to revisit if retrieval time becomes the constraint.
+- **Byte ranges, not NACK bitmaps.** FETCH carries `(session, base_offset, req_offset, req_length, chunk_size)`. To fill gaps the base re-issues FETCH for the missing sub-range under the same session ID; `chunk_index` is computed relative to `base_offset`, so re-fetched chunks carry the same indices as the originals and land in the same bitmap slots. Range-based resumption is bitmap-free on the wire and fully resumable; scattered-loss bitmaps remain the later optimization.
+- **No separate session header.** The base issued the request, so it already knows the chunk count; the source's reply needs no `{total chunks, CRC, flags}` header (step 1). A short or absent chunk is the end-of-data marker, which also covers a source whose data ends earlier than the requested range.
+- **FETCH floods; chunks route.** FETCH is a flooded SESSION frame (reusing the §6 flood relay and dedup) so it reaches a target whose tree state is stale after long standby; only chunks use the tree. A broadcast FETCH is ignored — it would set the whole fleet streaming at once.
+- **One session per node.** A new FETCH replaces whatever that node was streaming, which is what makes re-FETCH the resumption primitive. Concurrent sessions per node would need the base-side scheduling of §7.4 to be worth anything.
+- **Per-chunk CRC now guards the source, not the link.** With the §10.2 MIC authenticating every frame, transit corruption is already caught; the per-chunk CRC16 earns its place by catching *source-side* corruption — a bad SD read that transmits intact (§10.1). Chunks failing it are dropped so the base's bitmap keeps that index missing and a re-FETCH re-reads the source.
+- **Scheduling.** Chunks are gated into the bulk window like any other class (§4). A mode whose bulk window is zero-width never opens, so bulk frames queued under it are dropped rather than deferred forever, and a FETCH issued in such a mode fails fast — the fleet must be switched to a retrieval mode first.
+
 ### 7.4 Scheduling Transfers Across the Fleet
 
 The base retrieves from nodes one branch at a time by default: only one active session per tree path avoids self-interference on shared relays. When the topology map shows two branches that are radio-independent (no shared relays, adequate spatial separation), the base may schedule them in parallel TDMA slots within the bulk window — GPS time makes the slot boundaries exact. With 30 nodes × ~200 kB event windows at a conservative 0.5 kB/s effective multi-hop rate, full-fleet retrieval is on the order of 3–4 hours serialized, and proportionally less with parallel branches; well within the between-test timeline.
@@ -247,12 +257,12 @@ All frames share a common header inside the LoRa PHY payload (max 255 B):
 | Field | Size | Notes |
 |---|---|---|
 | Network ID | 2 B | Deployment identifier; foreign frames dropped. |
-| Msg type | 1 B | BEACON (0x01), CMD (0x02), CMD-ACK (0x03), TELEM (0x04), HOP-ACK (0x05, Rev B — §6.4), DATA (0x06), DATA-ACK (0x07), SESSION (0x08). |
+| Msg type | 1 B | BEACON (0x01), CMD (0x02), CMD-ACK (0x03), TELEM (0x04), HOP-ACK (0x05, Rev B — §6.4), DATA (0x06, bulk chunk up the tree), DATA-ACK (0x07, reserved for burst selective-ACK), SESSION (0x08, flooded FETCH). |
 | Src ID / Dst ID | 1 B + 1 B | Dst 255 = broadcast/flood. |
 | Seq | 2 B | Per-type sequence for dedup and windows. For tree-unicast frames it is re-stamped at each hop (§6.4); end-to-end identity is payload-level. |
 | TTL / hops | 1 B | Flood control; also records hop count in beacons. |
 | Payload | 0–240 B | Type-specific. |
-| MIC | 4 B | Message integrity code (Section 10). AES-128-CMAC truncated; covers header + payload. |
+| MIC | 4 B | Message integrity code (Section 10). AES-128-CMAC truncated; covers header + payload, plus the sender's superframe index appended to the MIC input but never transmitted (§10.2 replay protection). |
 
 Total overhead is 12 bytes, leaving ~180–240 bytes of useful payload per frame depending on radio settings — the basis for the default chunk size. **Rev B note:** over the RYLR998's hex-encoded AT transport (§3.4) the frame ceiling is 120 bytes (108 B payload); control frames are unaffected, bulk chunks must be sized down accordingly.
 
@@ -292,7 +302,12 @@ All state transitions and their causes are appended to a small event log on the 
 Even on a private test range, the ARM path warrants protection against accidental or malicious injection (LoRa is trivially receivable and transmittable with hobby hardware):
 
 - All frames authenticated with a 4-byte MIC under a pre-shared network key provisioned at flash time. Frames failing the MIC are dropped before parsing. **Implemented in Rev B:** AES-128-CMAC (RFC 4493) truncated to 4 bytes, portable software AES verified against the RFC known-answer vectors; the 2⁻³² blind-forgery bound is rate-limited by LoRa air time to a few attempts per second. The library keeps the MIC pluggable (a null stub remains for bench/simulator use only).
-- **Replay protection — open as of Rev B (updated post-M2).** The MIC makes frames unforgeable but not un-replayable: a recorded valid frame can be retransmitted later. Current mitigations are robustness features, not security boundaries — the executed-command cache suppresses replayed command IDs only until it wraps or the node reboots, and ARM validity windows make stale ARMs inert at the application layer. With the §4 scheduler implemented, every node now computes a shared superframe index, which enables the preferred fix **without any wire-format change**: mix the current superframe index into the MIC input (compute over frame ‖ index; the receiver verifies against the current index, retrying ±1 for boundary straddles). A replayed frame from an earlier superframe then fails the MIC outright, statelessly. This is the planned M4 remainder; settle it before M3 bakes MIC semantics into multi-superframe bulk sessions (open question, §13).
+- **Replay protection — implemented in M3.** The MIC alone makes frames unforgeable but not un-replayable: a recorded valid frame could be retransmitted later. The fix shipped as designed, **with no wire-format change**: the superframe index is appended to the MIC input but never transmitted (compute over frame ‖ index), and the receiver verifies against its own current index, retrying ±1 for boundary straddles. A replayed frame from any other superframe fails the MIC outright, statelessly, with no per-sender state to keep. Implementation details worth recording:
+  - **Sealed at transmit time, not enqueue time.** Frames are built when queued but can transmit much later — telemetry waits for its micro-slot, window-gated frames defer to the next superframe, and per-hop retries can cross a boundary. The MIC trailer is therefore recomputed at the moment of transmission (every send, including each retry), so what goes on air always carries the index the receiver will check. Without this, a deferred frame could be several superframes stale on arrival and fail a ±1 check legitimately.
+  - **Tolerance is a tunable** (§11, default ±1). It bounds the replay window: an attacker's recording is useful only within the tolerance of its capture, i.e. seconds to minutes depending on mode.
+  - **Cost.** The accept path is one MIC computation (the receiver's own index is tried first); a frame that fails all candidates costs 1 + 2 × tolerance. Rate-limited by air time, as with the 2⁻³² forgery bound.
+  - **Requires the §4 scheduler.** Without a shared superframe index there is nothing to bind to, so scheduler-off deployments use a constant index — identical on-air bytes, replay protection inactive. This makes GPS time (M5) a prerequisite for replay protection in the field, and it is why the example firmware, which free-runs on its boot clock, does not yet benefit. Deployments that need replay protection without a shared clock would need the persisted-counter alternative.
+  - Application-layer mitigations remain useful in depth: ARM validity windows (§6.2) keep stale ARMs inert regardless, and the executed-command cache still suppresses duplicate execution within its wrap window.
 - The RYLR998's `AT+CPIN` module encryption is **not** used as a security control (unspecified algorithm); §10.2 authentication happens above the radio.
 - Payload encryption (AES-CTR) is optional and cheap on the Pico if data confidentiality is desired; authentication is the non-negotiable part.
 
@@ -311,8 +326,9 @@ Even on a private test range, the ARM path warrants protection against accidenta
 | Hop retries (tree unicast) | 3, at 400 ms + 0–200 ms jitter | Per-hop reliability without hogging air (§6.4). |
 | Parent-fail limit | 3 exhausted sends | Fast dead-parent failover between epochs (§6.4). |
 | Upward send jitter | 0–300 ms | Desynchronizes post-flood ACK bursts (§6.4). |
-| Chunk payload C | 180 B (96 B on RYLR998 AT transport) | Fits one frame with header + MIC (§3.4, §8). |
-| Burst window W | 16 chunks | ~3 kB relay RAM; good pipe utilization. |
+| Chunk payload C | 180 B (96 B on RYLR998 AT transport) | Fits one frame with header + MIC (§3.4, §8). Carried per-session in the FETCH frame, not compiled in. |
+| Burst window W | 16 chunks | ~3 kB relay RAM; good pipe utilization. *Not used by the M3 first cut* (one chunk in flight, §7.3). |
+| MIC superframe tolerance | ±1 superframe | Replay window vs. tolerance for boundary straddles (§10.2). |
 | Flood relay dedup cache | 32 seqs | Covers TTL × retry space. |
 | Executed-command cache | 32 command IDs | Exactly-once execution across re-floods (§6.1). |
 | Per-hop dedup cache | 16 (src, type, seq) | Covers the lost-HOP-ACK retransmit case (§6.4). |
@@ -339,5 +355,6 @@ Carried over from Rev A (with status) and new from the Rev B work:
 3. ~~Second radio channel feasibility on chosen LoRa module.~~ *Resolved by module selection: the RYLR998 is single-channel (§3.4). The bulk profile becomes temporal (per-session reconfiguration), unless a second module per node is added.*
 4. Whether the base station should support a mobile mode (vehicle-mounted gateway driving the range to shorten hop counts for retrieval). *Open.*
 5. Key management workflow: per-deployment key rotation at provisioning vs. fixed fleet key. *Sharpened by the Rev B MIC: the key is now load-bearing; the examples compile it in, which is not a production flow.*
-6. **New:** replay-protection mechanism (§10.2). *Narrowed by M2:* the superframe scheduler shipped with no wire-format change, and the shared superframe index it provides makes the GPS-bound MIC (frame ‖ superframe index, verify ±1) implementable as-is; the persisted-counter alternative remains only as a fallback for scheduler-off deployments. Decide before M3 defines bulk-session MIC semantics.
-7. **New:** bulk transfer over the RYLR998's hex transport (§3.4) — accept ~2× air time at 96 B chunks, qualify off-spec binary AT payloads on the bench, or move bulk-heavy deployments to an SPI radio.
+6. ~~Replay-protection mechanism (§10.2).~~ *Resolved in M3:* the superframe-bound MIC (frame ‖ superframe index, sealed at transmit time, verified ±1) shipped with no wire-format change. The remaining question is narrower and belongs to deployment planning: replay protection is inactive until nodes share GPS time (M5), and deployments that must run without a shared clock would need the persisted-counter fallback.
+7. **New:** bulk transfer over the RYLR998's hex transport (§3.4) — accept ~2× air time at 96 B chunks, qualify off-spec binary AT payloads on the bench, or move bulk-heavy deployments to an SPI radio. *M3 note:* the first cut is round-trip-bound rather than air-time-bound (one chunk in flight per hop), so chunk size matters less than it will once burst pipelining lands; measure on real hardware before optimizing either.
+8. **New:** bulk-window scheduling policy (§7.4). The library gates bulk traffic into the §4 bulk window, but *who opens that window and when* — a retrieval mode commanded fleet-wide, versus per-branch TDMA slots for radio-independent branches — is base-station policy that M3 deliberately left to M6. A related question: whether a node being retrieved should stay in a fast mode for the duration, given the power cost.

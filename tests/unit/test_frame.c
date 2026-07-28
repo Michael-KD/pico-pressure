@@ -125,6 +125,56 @@ static void test_mic_gate(void)
                MESH_FRAME_E_MIC);
 }
 
+/* §10.2 replay protection: the MIC binds the transmit-time superframe
+ * index. Within the ±tolerance a boundary-straddling frame verifies;
+ * outside it — a replay from an earlier superframe — it is rejected. */
+static void test_sf_binding(void)
+{
+    uint8_t buf[MESH_MAX_FRAME];
+    mesh_frame_t f;
+    uint8_t payload[3] = { 9, 8, 7 };
+    size_t len = mesh_frame_build(NET, &mic_xor, buf, MESH_FT_TELEM, 3, 2,
+                                  77, 5, payload, sizeof(payload));
+
+    /* Fire-time seal for superframe 42: accepted at 42 and 42±1... */
+    mesh_frame_seal(&mic_xor, buf, len, 42);
+    T_CHECK_EQ(mesh_frame_parse_sf(NET, &mic_xor, buf, len, 42, 1, &f),
+               MESH_FRAME_OK);
+    T_CHECK_EQ(f.seq, 77);
+    T_CHECK(memcmp(f.payload, payload, sizeof(payload)) == 0);
+    T_CHECK_EQ(mesh_frame_parse_sf(NET, &mic_xor, buf, len, 43, 1, &f),
+               MESH_FRAME_OK);
+    T_CHECK_EQ(mesh_frame_parse_sf(NET, &mic_xor, buf, len, 41, 1, &f),
+               MESH_FRAME_OK);
+
+    /* ...but is a rejected replay two superframes away. */
+    T_CHECK_EQ(mesh_frame_parse_sf(NET, &mic_xor, buf, len, 44, 1, &f),
+               MESH_FRAME_E_MIC);
+    T_CHECK_EQ(mesh_frame_parse_sf(NET, &mic_xor, buf, len, 40, 1, &f),
+               MESH_FRAME_E_MIC);
+
+    /* Zero tolerance accepts only the exact index. */
+    T_CHECK_EQ(mesh_frame_parse_sf(NET, &mic_xor, buf, len, 42, 0, &f),
+               MESH_FRAME_OK);
+    T_CHECK_EQ(mesh_frame_parse_sf(NET, &mic_xor, buf, len, 43, 0, &f),
+               MESH_FRAME_E_MIC);
+
+    /* Underflow guard at the epoch start: center 0 must not wrap. */
+    mesh_frame_seal(&mic_xor, buf, len, 1);
+    T_CHECK_EQ(mesh_frame_parse_sf(NET, &mic_xor, buf, len, 0, 1, &f),
+               MESH_FRAME_OK);
+
+    /* Build seals with index 0 — exactly what the scheduler-off parse
+     * wrapper verifies against; a scheduler-on receiver at a distant
+     * index rejects the same bytes. */
+    len = mesh_frame_build(NET, &mic_xor, buf, MESH_FT_CMD, 1, 2, 3, 4,
+                           NULL, 0);
+    T_CHECK_EQ(mesh_frame_parse(NET, &mic_xor, buf, len, &f),
+               MESH_FRAME_OK);
+    T_CHECK_EQ(mesh_frame_parse_sf(NET, &mic_xor, buf, len, 7, 1, &f),
+               MESH_FRAME_E_MIC);
+}
+
 int main(void)
 {
     T_RUN(test_roundtrip);
@@ -133,5 +183,6 @@ int main(void)
     T_RUN(test_parse_bounds);
     T_RUN(test_foreign_network_dropped);
     T_RUN(test_mic_gate);
+    T_RUN(test_sf_binding);
     return t_summary();
 }

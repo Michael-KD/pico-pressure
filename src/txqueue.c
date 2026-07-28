@@ -113,11 +113,13 @@ static uint8_t txq_win(const mesh_txq_entry_t *e)
  * sender does not fire at the same instant. */
 static uint32_t txq_defer_jitter(mesh_t *m, const mesh_txq_entry_t *e)
 {
+    uint8_t t;
     if (e->await_hop_ack)
         return mesh_rand_below(m, MESH_UP_JITTER_US);
     if (e->kind == MESH_TXK_BEACON)
         return mesh_rand_below(m, MESH_BEACON_BACKOFF_US);
-    if (e->buf[MESH_OFF_TYPE] == MESH_FT_CMD && !m->is_root)
+    t = e->buf[MESH_OFF_TYPE];
+    if ((t == MESH_FT_CMD || t == MESH_FT_SESSION) && !m->is_root)
         return mesh_rand_below(m, MESH_FLOOD_BACKOFF_US); /* flood relay */
     return 0; /* root's own beacon/flood: fire at window start */
 }
@@ -140,6 +142,15 @@ static void txq_fire(mesh_t *m, mesh_txq_entry_t *e, uint64_t now)
 
     if (e->await_hop_ack && e->attempts_left <= MESH_HOP_RETRIES)
         m->stats.hop_retries++; /* any send after the first */
+
+    /* §10.2 replay protection: the MIC binds the *transmit-time*
+     * superframe index, so it is sealed here rather than at enqueue —
+     * entries get deferred into later windows and retries can cross a
+     * superframe boundary, and every send must carry the index the
+     * receiver will verify against (±MESH_MIC_SF_TOLERANCE). */
+    if (m->sched.enabled)
+        mesh_frame_seal(&m->mic, e->buf, e->len,
+                        mesh_sched_superframe(m, now));
 
     if (m->radio.transmit(m->radio.ctx, e->buf, e->len, MESH_PROFILE_CONTROL))
         m->stats.tx_frames++;
@@ -164,9 +175,15 @@ uint64_t mesh_txq_poll(mesh_t *m, uint64_t now)
             continue;
         if (e->due_us <= now) {
             /* Superframe gating (§4): an entry due outside its window
-             * is rescheduled to the window's next opening. */
+             * is rescheduled to the window's next opening. A window the
+             * current mode doesn't have at all (zero width — e.g. bulk
+             * traffic outside a retrieval mode) never opens: drop the
+             * entry rather than pinning the slot forever. */
             uint64_t gate = mesh_sched_gate(m, txq_win(e), now);
-            if (gate > now) {
+            if (gate == MESH_NO_EVENT) {
+                e->in_use = false;
+                m->stats.tx_win_dropped++;
+            } else if (gate > now) {
                 e->due_us = gate + txq_defer_jitter(m, e);
                 m->stats.tx_deferred++;
             } else {

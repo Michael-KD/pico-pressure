@@ -24,6 +24,10 @@ TELEM: node 2 (parent 1, standby, 4.9V, 31C)
 | `resend` | Re-floods the **last** command with the *same* command ID. Nodes that already executed it just re-ACK (they never execute twice); nodes that missed it execute now. Use this to chase stragglers until the checklist is complete. |
 | `top` | Prints the topology map / ACK checklist (see below). |
 | `stats` | Prints mesh and radio driver counters (frames sent/received, MIC drops, retries, module errors) — the first stop when something looks wrong. |
+| `list <node>` | Asks a node for its **recording index** (design doc §7.1). The reply streams back as `INDEX:` text — the example nodes report one 4 kB synthetic event and its CRC. |
+| `fetch <node> [bytes]` | Retrieves the node's event data over the mesh (default 4096 bytes, 96-byte chunks). Progress prints as `DATA: chunk …` lines; on completion the base prints a CRC16 to compare against the node's index line. |
+| `refetch` | Re-requests the current fetch **from the first missing chunk** — the §7.3 resumption mechanism. Chunks already received are kept; repeat until `fstat` says complete. |
+| `fstat` | Fetch progress: chunks received, the missing-chunk list, and the final CRC once complete. |
 
 Anything else prints a one-line usage reminder.
 
@@ -58,6 +62,30 @@ back hop-by-hop through the tree. The base never assumes delivery —
 that's what the checklist is for. All frames are authenticated with
 AES-128-CMAC under the key in [node_config.h](node_config.h); a node
 with the wrong key can neither read nor issue commands.
+
+## Retrieving data (30-second version)
+
+A `fetch` floods a FETCH request at the target node; the node streams
+the requested byte range back **up the tree**, one CRC-protected chunk
+at a time, over the same per-hop-reliable path that carries ACKs. The
+base (this firmware) keeps the checklist: which chunk indices have
+arrived. Nothing is assumed delivered — if chunks are missing, `fstat`
+shows the gaps and `refetch` asks the node to resend from the first gap
+under the same session. Chunks that arrive twice are simply ignored.
+
+Practical notes:
+
+- A node runs **one bulk session at a time**: a new `fetch` (or `list`,
+  which is just bulk session 0 by convention) replaces whatever that
+  node was streaming. `refetch` picks the fetch back up.
+- The example field nodes serve a deterministic 4 kB synthetic trace;
+  the CRC16 printed on completion must match the one in the node's
+  `INDEX:` line — that's the end-to-end verification. The production
+  firmware serves real event windows from the SD card through the same
+  `on_bulk_read` callback.
+- All of this is authenticated like everything else; with the superframe
+  scheduler enabled (M5 brings GPS time), bulk traffic additionally
+  confines itself to the schedule's bulk window.
 
 ## Command payloads (for extending the set)
 

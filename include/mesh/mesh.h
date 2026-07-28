@@ -4,9 +4,11 @@
  * Radio-agnostic core mesh implementing the design in
  * Blast_Sensor_Mesh_Design.md (Rev B): collection-tree routing rooted at
  * the base station, ETX link metric from beacon reception, controlled
- * flooding for commands, per-hop-reliable tree unicast for ACKs and
- * telemetry, and an optional GPS-aligned superframe scheduler with
- * duty-cycled listening (mesh_sched.h).
+ * flooding for commands, per-hop-reliable tree unicast for ACKs,
+ * telemetry, and bulk data chunks (FETCH sessions, §7), an optional
+ * GPS-aligned superframe scheduler with duty-cycled listening
+ * (mesh_sched.h), and replay-protected AES-CMAC frame authentication
+ * (superframe-bound MIC, §10.2).
  *
  * Usage model (single-threaded, externally clocked, no allocation):
  *   - The application owns a mesh_t (statically allocated) and calls
@@ -59,10 +61,9 @@ typedef enum {
     MESH_FT_CMD_ACK  = 0x03, /* execution ACK, tree unicast to root */
     MESH_FT_TELEM    = 0x04, /* status report, tree unicast to root */
     MESH_FT_HOP_ACK  = 0x05, /* single-hop link ACK for tree unicast */
-    /* Reserved for the bulk-transfer milestone: */
-    MESH_FT_DATA     = 0x06,
-    MESH_FT_DATA_ACK = 0x07,
-    MESH_FT_SESSION  = 0x08,
+    MESH_FT_DATA     = 0x06, /* bulk chunk, tree unicast to root (§7) */
+    MESH_FT_DATA_ACK = 0x07, /* reserved: store-and-forward bursts */
+    MESH_FT_SESSION  = 0x08, /* FETCH request, flooded to target (§7.3) */
 } mesh_frame_type_t;
 
 /* ---- Diagnostics: neighbor table entry (read-only to the app) ---- */
@@ -115,6 +116,11 @@ typedef struct {
     uint32_t parent_changes;
     uint32_t neighbors_evicted;
     uint32_t tx_deferred;           /* sends rescheduled into their window */
+    uint32_t tx_win_dropped;        /* dropped: window absent in this mode */
+    uint32_t bulk_fetches_rx;       /* node: FETCH sessions accepted */
+    uint32_t bulk_chunks_sent;      /* node: own DATA chunks originated */
+    uint32_t bulk_chunks_root;      /* root: chunks delivered to the app */
+    uint32_t bulk_crc_drops;        /* root: chunks failing source CRC16 */
 } mesh_stats_t;
 
 /* ---- Telemetry as delivered to the root callback ----
@@ -138,6 +144,14 @@ typedef struct {
 #define MESH_CMD_HDR 2
 #define MESH_MAX_CMD_PAYLOAD (MESH_MAX_PAYLOAD - MESH_CMD_HDR)
 #define MESH_MAX_TELEM_PAYLOAD (MESH_MAX_PAYLOAD - MESH_TELEM_HDR)
+
+/* Bulk payload layouts (§7.3): a FETCH request rides a SESSION frame as
+ * session(1) base_off(4 LE) req_off(4 LE) req_len(4 LE) chunk_size(1);
+ * a chunk rides a DATA frame as session(1) chunk_index(2 LE)
+ * crc16(2 LE) followed by the chunk bytes. */
+#define MESH_FETCH_PLEN 14
+#define MESH_BULK_DATA_HDR 5
+#define MESH_MAX_BULK_DATA (MESH_MAX_PAYLOAD - MESH_BULK_DATA_HDR)
 
 /* ---- Application callbacks ----
  * All callbacks run synchronously inside mesh_rx()/mesh_poll(). */
@@ -163,6 +177,24 @@ typedef struct {
     /* Root only: a telemetry report arrived. */
     void (*on_telemetry)(void *user, const mesh_telem_info_t *info,
                          const uint8_t *payload, uint8_t len);
+
+    /* Field node: serve bulk data for a FETCH session (§7). Copy up to
+     * `max` bytes at absolute byte offset `offset` into `buf` and
+     * return the count. Returning less than `max` marks the end of the
+     * data: the short (or absent) chunk closes the session. Session
+     * numbering is an application convention — the examples reserve
+     * session 0 for the recording index (LIST). NULL = this node serves
+     * no bulk data; FETCHes are ignored. */
+    uint8_t (*on_bulk_read)(void *user, uint8_t session, uint32_t offset,
+                            uint8_t *buf, uint8_t max);
+
+    /* Root only: a CRC-verified bulk chunk arrived. chunk_index is
+     * relative to the session's base_offset (chunk k covers bytes
+     * [base_offset + k*chunk_size ...)). Completion tracking and
+     * re-FETCH of missing indices are the base application's job. */
+    void (*on_bulk_data)(void *user, uint8_t session,
+                         uint16_t chunk_index, const uint8_t *data,
+                         uint8_t len);
 
     /* Parent changed (attach, switch, or loss — loss reports new parent
      * MESH_ID_NONE). Useful for LEDs/logging; no action required. */
@@ -206,6 +238,19 @@ typedef struct {
     uint8_t  type;
     uint16_t seq;
 } mesh_up_dedup_t;
+
+/* Bulk-source session state (§7.3): one FETCH session per node, one
+ * chunk in flight at a time. Replaced wholesale by each new FETCH. */
+typedef struct {
+    bool     active;
+    bool     pending;      /* a chunk is in the TX queue awaiting its hop */
+    uint8_t  session;
+    uint8_t  chunk_size;
+    uint16_t pending_seq;  /* txq ack_seq of the chunk in flight */
+    uint32_t base_off;     /* chunk-index origin */
+    uint32_t cursor;       /* next byte offset to send */
+    uint32_t end_off;      /* one past the last requested byte */
+} mesh_bulk_t;
 
 typedef struct mesh {
     /* configuration */
@@ -262,6 +307,9 @@ typedef struct mesh {
     mesh_neighbor_t  nbrs[MESH_MAX_NEIGHBORS];
     mesh_txq_entry_t txq[MESH_TXQ_DEPTH];
 
+    /* bulk-source session (§7.3) */
+    mesh_bulk_t bulk;
+
     mesh_stats_t stats;
     bool initialized;
 } mesh_t;
@@ -305,11 +353,29 @@ uint16_t mesh_root_command(mesh_t *m, uint8_t target,
 bool mesh_node_telemetry(mesh_t *m, const uint8_t *payload, uint8_t len,
                          uint64_t now_us);
 
+/* Root only: flood a FETCH (§7.3) asking `target` to stream
+ * `req_length` bytes starting at `req_offset` up the tree in
+ * `chunk_size`-byte DATA chunks (arriving at on_bulk_data).
+ * `base_offset` is the chunk-index origin: keep it constant across
+ * re-FETCHes of missing sub-ranges of the same object so chunk indices
+ * stay aligned, and keep req_offset - base_offset a multiple of
+ * chunk_size. Tracking received indices and re-FETCHing gaps is the
+ * base application's job (design principle 6). Returns false on invalid
+ * arguments, full queue, or a scheduler mode with no bulk window. */
+bool mesh_root_fetch(mesh_t *m, uint8_t target, uint8_t session,
+                     uint32_t base_offset, uint32_t req_offset,
+                     uint32_t req_length, uint8_t chunk_size,
+                     uint64_t now_us);
+
 /* ---- Introspection ---- */
 
 uint8_t  mesh_parent(const mesh_t *m);     /* MESH_ID_NONE if unattached */
 uint16_t mesh_path_cost(const mesh_t *m);  /* Q8.8 */
 uint8_t  mesh_hops(const mesh_t *m);
+/* CRC-16/CCITT-FALSE — the per-chunk integrity check (§7.3), exposed
+ * so applications can run end-to-end verification over reassembled
+ * data. */
+uint16_t mesh_crc16(const uint8_t *data, size_t len);
 const mesh_stats_t    *mesh_stats_get(const mesh_t *m);
 /* Neighbor table slot idx (0..MESH_MAX_NEIGHBORS-1); NULL if unused. */
 const mesh_neighbor_t *mesh_neighbor_at(const mesh_t *m, unsigned idx);

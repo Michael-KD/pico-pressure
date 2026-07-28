@@ -18,6 +18,10 @@
  *               it re-ACK without re-executing — §6 step 4)
  *   top         print the topology map / ACK checklist
  *   stats       mesh + radio counters
+ *   list <n>    fetch node n's recording index (bulk session 0)
+ *   fetch <n> [bytes]   retrieve node n's synthetic event window (§7.3)
+ *   refetch     re-FETCH from the first missing chunk (resumption)
+ *   fstat       fetch progress: chunk bitmap, missing list, final CRC
  */
 #include <stdio.h>
 #include <string.h>
@@ -56,6 +60,24 @@ static uint16_t last_cmd_id;
 static uint8_t last_cmd_pl[8];
 static uint8_t last_cmd_len;
 
+/* ---- bulk fetch bookkeeping (§7.3: the base holds the bitmap) ---- */
+
+#define FETCH_MAX_CHUNKS 64 /* 64 x 96 B chunks = 6 kB per fetch */
+
+static struct {
+    bool     active;
+    uint8_t  target;
+    uint8_t  session;
+    uint8_t  chunk;
+    uint32_t total;
+    unsigned nchunks;
+    uint64_t mask;    /* received chunk indices */
+    unsigned got;
+    uint8_t  buf[FETCH_MAX_CHUNKS * MESH_BULK_CHUNK];
+} fx;
+
+static uint8_t next_session = 1; /* session 0 is the LIST convention */
+
 /* ---- mesh callbacks ---- */
 
 static void on_command_ack(void *user, uint8_t origin, uint16_t cmd_id,
@@ -92,6 +114,32 @@ static void on_telemetry(void *user, const mesh_telem_info_t *info,
     printf("TELEM: node %u (parent %u, %s, %u.%uV, %dC)\n", info->origin,
            info->parent, e->state ? "ARMED" : "standby", e->batt_dv / 10,
            e->batt_dv % 10, e->temp_c);
+}
+
+static void on_bulk_data(void *user, uint8_t session, uint16_t idx,
+                         const uint8_t *data, uint8_t len)
+{
+    (void)user;
+    if (session == 0) {
+        /* LIST: the node's recording index streams back as text. */
+        printf("INDEX: %.*s\n", (int)len, (const char *)data);
+        return;
+    }
+    if (!fx.active || session != fx.session || idx >= FETCH_MAX_CHUNKS)
+        return;
+    uint32_t off = (uint32_t)idx * fx.chunk;
+    if (!(fx.mask & (1ull << idx))) {
+        fx.mask |= 1ull << idx;
+        fx.got++;
+        if (off + len <= sizeof(fx.buf))
+            memcpy(&fx.buf[off], data, len);
+    }
+    printf("DATA: chunk %u (%u B) — %u/%u\n", idx, len, fx.got,
+           fx.nchunks);
+    if (fx.got == fx.nchunks)
+        printf("fetch complete: %lu bytes, crc16 %04X (compare with the "
+               "node's index line)\n",
+               (unsigned long)fx.total, mesh_crc16(fx.buf, fx.total));
 }
 
 static void on_radio_frame(void *ctx, const uint8_t *frame, size_t len,
@@ -147,6 +195,91 @@ static void print_top(void)
     }
 }
 
+/* ---- bulk fetch commands (§7.3, base-driven) ---- */
+
+static void start_fetch(uint8_t node, uint32_t bytes)
+{
+    uint64_t now = time_us_64();
+    if (bytes == 0)
+        bytes = 1;
+    if (bytes > sizeof(fx.buf))
+        bytes = sizeof(fx.buf);
+    memset(&fx, 0, sizeof(fx));
+    fx.target = node;
+    fx.session = next_session++;
+    if (next_session == 0)
+        next_session = 1;
+    fx.chunk = MESH_BULK_CHUNK;
+    fx.total = bytes;
+    fx.nchunks = (bytes + fx.chunk - 1) / fx.chunk;
+    if (!mesh_root_fetch(&mesh, node, fx.session, 0, 0, bytes, fx.chunk,
+                         now)) {
+        printf("fetch failed to start (queue full?)\n");
+        return;
+    }
+    fx.active = true;
+    mesh_poll(&mesh, now);
+    printf("fetch: session %u — %lu bytes in %u x %u B chunks from "
+           "node %u\n", fx.session, (unsigned long)bytes, fx.nchunks,
+           fx.chunk, node);
+}
+
+static unsigned first_missing_chunk(void)
+{
+    unsigned i = 0;
+    while (i < fx.nchunks && ((fx.mask >> i) & 1))
+        i++;
+    return i;
+}
+
+static void refetch(void)
+{
+    if (!fx.active) {
+        printf("no fetch session (use: fetch <node> [bytes])\n");
+        return;
+    }
+    unsigned first = first_missing_chunk();
+    if (first >= fx.nchunks) {
+        printf("fetch already complete\n");
+        return;
+    }
+    uint32_t off = (uint32_t)first * fx.chunk;
+    uint64_t now = time_us_64();
+    if (!mesh_root_fetch(&mesh, fx.target, fx.session, 0, off,
+                         fx.total - off, fx.chunk, now)) {
+        printf("refetch failed (queue full?)\n");
+        return;
+    }
+    mesh_poll(&mesh, now);
+    printf("refetch: session %u from chunk %u (offset %lu)\n",
+           fx.session, first, (unsigned long)off);
+}
+
+static void print_fstat(void)
+{
+    if (!fx.active) {
+        printf("no fetch session\n");
+        return;
+    }
+    printf("fetch: node %u session %u — %u/%u chunks, %lu bytes "
+           "requested\n", fx.target, fx.session, fx.got, fx.nchunks,
+           (unsigned long)fx.total);
+    if (fx.got >= fx.nchunks) {
+        printf("  complete; crc16 %04X\n", mesh_crc16(fx.buf, fx.total));
+        return;
+    }
+    printf("  missing:");
+    unsigned shown = 0;
+    for (unsigned i = 0; i < fx.nchunks && shown < 16; i++) {
+        if (!((fx.mask >> i) & 1)) {
+            printf(" %u", i);
+            shown++;
+        }
+    }
+    printf("%s — `refetch` resumes from the first gap\n",
+           (fx.nchunks - fx.got > 16) ? " ..." : "");
+}
+
 static void print_stats(void)
 {
     const mesh_stats_t *m = mesh_stats_get(&mesh);
@@ -188,9 +321,38 @@ static void run_cli_line(char *line)
         print_top();
     } else if (strcmp(line, "stats") == 0) {
         print_stats();
+    } else if (strncmp(line, "list", 4) == 0) {
+        unsigned node = 0;
+        if (sscanf(line + 4, "%u", &node) == 1 && node > 0 && node < 255) {
+            /* LIST = bulk session 0 by convention: the node streams its
+             * recording index back as text. (This replaces any fetch
+             * session in progress on that node — `refetch` resumes.) */
+            uint64_t now = time_us_64();
+            if (mesh_root_fetch(&mesh, (uint8_t)node, 0, 0, 0, 128, 32,
+                                now))
+                printf("list: asked node %u for its index\n", node);
+            else
+                printf("list failed (queue full?)\n");
+            mesh_poll(&mesh, now);
+        } else {
+            printf("usage: list <node>\n");
+        }
+    } else if (strncmp(line, "fetch", 5) == 0) {
+        unsigned node = 0;
+        unsigned long bytes = 4096; /* the example nodes' event size */
+        if (sscanf(line + 5, "%u %lu", &node, &bytes) >= 1 && node > 0 &&
+            node < 255)
+            start_fetch((uint8_t)node, (uint32_t)bytes);
+        else
+            printf("usage: fetch <node> [bytes]\n");
+    } else if (strcmp(line, "refetch") == 0) {
+        refetch();
+    } else if (strcmp(line, "fstat") == 0) {
+        print_fstat();
     } else if (line[0] != '\0') {
         printf("commands: arm [min] | disarm | status | resend | top | "
-               "stats\n");
+               "stats | list <n> | fetch <n> [bytes] | refetch | "
+               "fstat\n");
     }
 }
 
@@ -247,6 +409,7 @@ int main(void)
         .cb = {
             .on_command_ack = on_command_ack,
             .on_telemetry = on_telemetry,
+            .on_bulk_data = on_bulk_data,
         },
         .rng_seed = 0xB05EBA5E,
     };
@@ -267,8 +430,10 @@ int main(void)
         rylr998_poll(&radio, now);
         mesh_poll(&mesh, now);
 
-        /* Superframe scheduling is application policy until M2: one
-         * beacon per SUPERFRAME_US, first one when the radio is ready. */
+        /* The library's superframe scheduler stays disabled until the
+         * fleet shares GPS time (M5), so beacon timing is application
+         * policy here: one per SUPERFRAME_US, starting when the radio
+         * is ready. */
         if (rylr998_ready(&radio) && now >= next_beacon) {
             next_beacon = now + SUPERFRAME_US;
             mesh_root_beacon(&mesh, now);

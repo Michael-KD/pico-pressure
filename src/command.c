@@ -164,6 +164,8 @@ void mesh_up_rx(mesh_t *m, const mesh_frame_t *f, uint64_t now)
                                      f->payload[3]);
         } else if (f->type == MESH_FT_TELEM) {
             mesh_telem_deliver_root(m, f);
+        } else if (f->type == MESH_FT_DATA) {
+            mesh_bulk_deliver_root(m, f);
         }
         return;
     }

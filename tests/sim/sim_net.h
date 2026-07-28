@@ -18,6 +18,8 @@
 #define SIM_MAX_INFLIGHT 512
 #define SIM_STEP_US 10000        /* 10 ms simulation step */
 #define SIM_NO_LINK 255
+#define SIM_BULK_MAX_CHUNKS 64   /* root sink tracks one bit per index */
+#define SIM_BULK_BUF 4096        /* root-side reassembly buffer */
 
 typedef struct sim_net sim_net_t;
 
@@ -61,6 +63,23 @@ struct sim_net {
     uint8_t reported_parent[SIM_MAX_NODES];
     unsigned frames_dropped;       /* lost to link loss (diagnostics) */
     unsigned frames_missed_asleep; /* arrived while receiver slept */
+
+    /* bulk retrieval bookkeeping (§7.3): every node serves the
+     * deterministic sim_bulk_byte() pattern; the root sink reassembles
+     * one session into bulk_buf and tracks received chunk indices. */
+    uint32_t bulk_src_len;         /* bytes each node's source can serve */
+    uint8_t  bulk_session;         /* session the root sink tracks */
+    uint32_t bulk_base;            /* chunk-index origin of that session */
+    uint8_t  bulk_chunk;           /* chunk size of that session */
+    uint64_t bulk_mask;            /* received chunk indices, bit each */
+    unsigned bulk_rx_chunks;       /* distinct chunk indices received */
+    uint8_t  bulk_buf[SIM_BULK_BUF];
+
+    /* Copy of the last frame actually delivered to a listening node —
+     * raw wire bytes for replay experiments (§10.2). */
+    uint8_t  tap_to;
+    uint8_t  tap_len;
+    uint8_t  tap_buf[MESH_MAX_FRAME];
 };
 
 /* Create n nodes with IDs 0..n-1 (0 is the root); no links yet. */
@@ -94,5 +113,16 @@ mesh_t *sim_mesh(sim_net_t *s, uint8_t id);
 /* True when every alive node is attached and parent chains reach the
  * root without loops, with strictly decreasing path cost toward it. */
 bool sim_tree_valid(sim_net_t *s);
+
+/* Deterministic bulk-source byte: what node `id` serves at offset
+ * `off`. The root sink reassembles into bulk_buf for comparison. */
+uint8_t sim_bulk_byte(uint8_t id, uint32_t off);
+
+/* Root FETCH wrapper: forwards to mesh_root_fetch and binds the sink
+ * bookkeeping (base/chunk). A new session id resets the received-chunk
+ * mask and buffer; the same id resumes it (§7.3 re-FETCH). */
+bool sim_fetch(sim_net_t *s, uint8_t target, uint8_t session,
+               uint32_t base, uint32_t off, uint32_t rlen,
+               uint8_t chunk);
 
 #endif /* SIM_NET_H */

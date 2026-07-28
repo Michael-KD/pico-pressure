@@ -169,4 +169,25 @@
 #define MESH_SCHED_GUARD_US 100000u /* 100 ms */
 #endif
 
+/* ---- Replay protection (§10.2) ----
+ * With the scheduler enabled, every frame's MIC binds the transmit-time
+ * superframe index; receivers accept the current index ± this tolerance
+ * (covers senders straddling a superframe boundary). A recorded frame
+ * replayed outside the tolerance fails the MIC statelessly. With the
+ * scheduler disabled the index is a constant 0 and replay protection is
+ * inactive. */
+#ifndef MESH_MIC_SF_TOLERANCE
+#define MESH_MIC_SF_TOLERANCE 1
+#endif
+
+/* ---- Bulk transfer (§7) ----
+ * Recommended default chunk payload for FETCH originators. The chunk
+ * size travels in each FETCH frame, so this is a convenience for base
+ * applications, not a protocol constant. 96 B is the working point for
+ * the RYLR998's hex-encoded AT transport (§3.4: 108 B payload ceiling
+ * minus the 5 B DATA header, rounded to a power-of-two-ish size). */
+#ifndef MESH_BULK_CHUNK
+#define MESH_BULK_CHUNK 96
+#endif
+
 #endif /* MESH_CONFIG_H */

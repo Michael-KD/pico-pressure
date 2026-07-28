@@ -365,6 +365,134 @@ static void test_scheduled_fleet(void)
     }
 }
 
+static void test_bulk_fetch_lossy_multihop(void)
+{
+    /* §7.3 first cut end-to-end: retrieve a 2000-byte "event window"
+     * from the far end of a 4-node lossy line in 64 B chunks (32
+     * chunks). The base drives completion exactly as the design says:
+     * FETCH, collect, re-FETCH from the first missing chunk until the
+     * bitmap is full. */
+    sim_init(&net, 4, 0xB0F1);
+    for (uint8_t i = 0; i + 1 < 4; i++)
+        sim_link(&net, i, (uint8_t)(i + 1), 10);
+
+    for (int e = 0; e < 8; e++)
+        sim_epoch(&net, SF);
+    T_CHECK(sim_tree_valid(&net));
+
+    const uint32_t total = 2000;
+    const uint8_t chunk = 64;
+    const unsigned nchunks = (total + chunk - 1) / chunk; /* 32 */
+
+    T_CHECK(sim_fetch(&net, 3, 1, 0, 0, total, chunk));
+    sim_run(&net, 45000000);
+    unsigned attempts = 1;
+    while (attempts < 8 && net.bulk_rx_chunks < nchunks) {
+        /* Base policy: resume from the first gap (§7.3 resumption). */
+        unsigned first = 0;
+        while (first < nchunks && (net.bulk_mask >> first) & 1)
+            first++;
+        uint32_t off = (uint32_t)first * chunk;
+        T_CHECK(sim_fetch(&net, 3, 1, 0, off, total - off, chunk));
+        sim_run(&net, 45000000);
+        sim_epoch(&net, SF); /* keep the tree fresh between attempts */
+        attempts++;
+    }
+    printf("  fetch attempts needed: %u\n", attempts);
+    T_CHECK_EQ(net.bulk_rx_chunks, nchunks);
+
+    /* Reassembled bytes are exactly what node 3's source serves. */
+    bool match = true;
+    for (uint32_t o = 0; o < total; o++)
+        if (net.bulk_buf[o] != sim_bulk_byte(3, o))
+            match = false;
+    T_CHECK(match);
+
+    /* The chunks really traveled the tree: both relays forwarded, the
+     * source streamed, and no chunk arrived corrupted. */
+    T_CHECK(mesh_stats_get(sim_mesh(&net, 1))->up_relayed >= nchunks);
+    T_CHECK(mesh_stats_get(sim_mesh(&net, 2))->up_relayed >= nchunks);
+    T_CHECK(mesh_stats_get(sim_mesh(&net, 3))->bulk_chunks_sent >=
+            nchunks);
+    T_CHECK(mesh_stats_get(sim_mesh(&net, 3))->bulk_fetches_rx >= 1);
+    T_CHECK_EQ(mesh_stats_get(sim_mesh(&net, 0))->bulk_crc_drops, 0);
+}
+
+static void test_bulk_scheduled_and_replay_rejected(void)
+{
+    /* Bulk retrieval under the full production stack: AES-CMAC MIC with
+     * the superframe-bound replay protection active, scheduler on with
+     * a bulk window, radios duty-cycling. Then the §10.2 property
+     * itself: a recorded frame replayed superframes later must fail
+     * the MIC. */
+    static const uint8_t key[16] = {
+        0xb1, 0x6b, 0x00, 0x57, 0x10, 0x11, 0x12, 0x13,
+        0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b,
+    };
+    static mesh_mic_cmac_t cmac;
+    mesh_mic_cmac_init(&cmac, key);
+    mesh_mic_ops_t ops = mesh_mic_cmac_ops(&cmac);
+
+    /* | beacon 5s | cmd 4s | telem 3s | bulk 5s | sleep 3s | = 20 s */
+    static const mesh_sched_cfg_t sc = {
+        .enabled = true,
+        .guard_us = 100000,
+        .mode = {
+            .period_us = 20000000,
+            .beacon_win_us = 5000000,
+            .cmd_win_us = 4000000,
+            .telem_win_us = 3000000,
+            .bulk_win_us = 5000000,
+            .telem_slot_us = 1000000,
+        },
+    };
+    const uint64_t sf = sc.mode.period_us;
+
+    sim_init_opt(&net, 3, 0x5EA1ED, &ops, &sc);
+    sim_link(&net, 0, 1, 0);
+    sim_link(&net, 1, 2, 0);
+
+    sim_run(&net, 6 * sf); /* auto-beacon formation */
+    T_CHECK(sim_tree_valid(&net));
+
+    /* 400 B in 64 B chunks from the 2-hop node: chunks flow only in
+     * the bulk windows, so give it a few superframes. */
+    const uint32_t total = 400;
+    const unsigned nchunks = (total + 63) / 64; /* 7 */
+    T_CHECK(sim_fetch(&net, 2, 1, 0, 0, total, 64));
+    sim_run(&net, 5 * sf);
+    T_CHECK_EQ(net.bulk_rx_chunks, nchunks);
+    bool match = true;
+    for (uint32_t o = 0; o < total; o++)
+        if (net.bulk_buf[o] != sim_bulk_byte(2, o))
+            match = false;
+    T_CHECK(match);
+
+    /* Normal operation never trips the superframe-bound MIC: senders
+     * seal at fire time and receivers verify ±1 across boundaries. */
+    for (unsigned i = 0; i < net.n_nodes; i++)
+        T_CHECK_EQ(mesh_stats_get(sim_mesh(&net, (uint8_t)i))->rx_drop_mic,
+                   0);
+
+    /* Replay: record a frame the fleet really delivered, wait three
+     * superframes, and inject the identical bytes at the same
+     * receiver. The MIC binds the transmit-time superframe index, so
+     * it must be rejected outright. */
+    uint8_t replay[MESH_MAX_FRAME];
+    uint8_t rlen = net.tap_len;
+    uint8_t rto = net.tap_to;
+    memcpy(replay, net.tap_buf, rlen);
+    T_CHECK(rlen > 0);
+
+    sim_run(&net, 3 * sf);
+    mesh_t *victim = sim_mesh(&net, rto);
+    uint32_t drops_before = mesh_stats_get(victim)->rx_drop_mic;
+    uint32_t frames_before = mesh_stats_get(victim)->rx_frames;
+    mesh_rx(victim, replay, rlen, -60, 8, net.now);
+    T_CHECK_EQ(mesh_stats_get(victim)->rx_drop_mic, drops_before + 1);
+    T_CHECK_EQ(mesh_stats_get(victim)->rx_frames, frames_before);
+}
+
 int main(void)
 {
     T_RUN(test_line3_forms_two_hop_tree);
@@ -375,5 +503,7 @@ int main(void)
     T_RUN(test_telemetry_builds_topology_map);
     T_RUN(test_authenticated_fleet);
     T_RUN(test_scheduled_fleet);
+    T_RUN(test_bulk_fetch_lossy_multihop);
+    T_RUN(test_bulk_scheduled_and_replay_rejected);
     return t_summary();
 }

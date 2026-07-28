@@ -97,6 +97,8 @@ uint64_t mesh_sched_gate(mesh_t *m, uint8_t win, uint64_t now)
     uint64_t sf0, ws, we;
     uint64_t phase = sched_phase(m, now, &sf0);
     win_bounds(&m->sched.mode, win, &ws, &we);
+    if (ws == we)
+        return MESH_NO_EVENT; /* window absent in this mode: never opens */
     if (phase >= ws && phase < we)
         return now;
     if (phase < ws)

@@ -12,7 +12,7 @@ Pico firmware and a driver for the REYAX RYLR998 LoRa module
 
 Each field node is a self-contained data logger — Raspberry Pi Pico, SD
 card, GPS receiver, barometric/blast pressure sensor, temperature sensor,
-solar power (see [project_background.txt](project_background.txt)). Nodes
+solar power. Nodes
 record pressure and temperature at 1 kHz around a blast event. The next
 hardware iteration adds a LoRa radio to every node and to a base station
 so that operators can:
@@ -30,16 +30,22 @@ damaged, or removed.
 
 ## What this library is
 
-A portable, radio-agnostic C11 library — the core mesh (M1) plus the
-superframe scheduler (M2) — implementing the design doc's
-collection-tree architecture:
+A portable, radio-agnostic C11 library — the core mesh (M1), the
+superframe scheduler (M2), and bulk retrieval (M3) — implementing the
+design doc's collection-tree architecture:
 
 - **Frame codec** (§8): 12-byte overhead (8 B header + 4 B MIC trailer),
   network-ID gate, pluggable message-integrity hook.
 - **Link authentication** (§10.2): AES-128-CMAC MIC (RFC 4493, verified
   against the RFC test vectors) under a pre-shared network key; frames
   failing the MIC are dropped before parsing. A null stub remains for
-  bench/simulator use. Replay protection is still open — see §10.2 Rev B.
+  bench/simulator use.
+- **Replay protection** (§10.2): the MIC binds the sender's superframe
+  index — appended to the MIC input, never transmitted, so the wire
+  format is unchanged — sealed at the moment of transmission and
+  verified ±1 superframe by the receiver. A recorded frame replayed
+  later fails the MIC statelessly. Requires the scheduler (a shared GPS
+  clock); without it the index is constant and the binding is inert.
 - **Neighbor discovery + ETX link estimation** (§5.2): beacon reception
   ratio over a sliding 16-epoch window, EWMA-smoothed, Q8.8 fixed point
   (no floats — the Pico's M0+ has no FPU).
@@ -63,6 +69,13 @@ collection-tree architecture:
   commanded absolute time. GPS-loss degrades gracefully (widened listen
   windows). Optional — disabled, the library runs M1-style with the
   application scheduling beacons.
+- **Bulk data retrieval** (§7): the base FETCHes a byte range from any
+  node; the node streams it back up the tree as CRC-protected chunks on
+  the same per-hop-reliable path, one in flight at a time. The base
+  holds the received-chunk bitmap and re-FETCHes gaps under the same
+  session — resumption is base-side state, so a node reboot costs only
+  the chunk in flight. Data comes from (and lands in) application
+  callbacks, so the SD card and event index stay out of the library.
 
 The same library serves both roles: node ID 0 is the root (base-station
 gateway); IDs 1–254 are field nodes.
@@ -91,7 +104,6 @@ gateway); IDs 1–254 are field nodes.
 
 ```
 Blast_Sensor_Mesh_Design.md   protocol spec (Rev B) — the design authority
-project_background.txt        original project description
 CMakeLists.txt                library + host tests (C11, -Wall -Wextra -Werror)
 include/mesh/
   mesh.h                      public API: mesh_t, init/rx/poll, send, callbacks
@@ -107,6 +119,7 @@ src/
   flood.c                     command flooding, dedup, TTL (§6)
   command.c                   execution + ACK, per-hop-reliable tree unicast
   telemetry.c                 status reports with routing context (§5.3)
+  bulk.c                      FETCH sessions, chunk streaming, CRC16 (§7.3)
   txqueue.c                   due-time TX queue: backoffs, retries, exhaustion
   sched.c                     superframe math, window gating, duty cycling
   mic_cmac.c                  AES-128-CMAC MIC (RFC 4493), portable software AES
@@ -120,7 +133,7 @@ examples/                     standalone pico-sdk project (see below)
   rylr998_pico.[ch]           Pico UART/IRQ glue for the radio driver
   radios/RYLR998/             portable AT-protocol driver core + datasheets
 tests/
-  unit/                       frame / MIC / sched / neighbor / tree / flood / driver tests
+  unit/                       frame / MIC / sched / neighbor / tree / flood / bulk / driver tests
   sim/sim_net.[ch]            multi-node simulator: virtual clock, lossy links
   sim/test_scenarios.c        integration scenarios (see below)
   sim/demo.c                  runnable ASCII demo of the whole protocol
@@ -135,7 +148,7 @@ Build and test on any Linux host (WSL Ubuntu works; needs `cmake`,
 ```sh
 cmake -B build -G Ninja
 cmake --build build
-ctest --test-dir build            # 8 suites, all green
+ctest --test-dir build            # 9 suites, all green
 ./build/tests/mesh_demo           # watch a 10-node fleet form, flood, heal
 ```
 
@@ -168,6 +181,10 @@ optional). The base station gives you a CLI on USB serial:
 > top           topology map / ACK checklist
 > resend        re-flood the last command for stragglers
 > stats         mesh + radio counters
+> list 3        node 3's recording index
+> fetch 3       retrieve node 3's event data over the mesh
+> fstat         chunks received / missing; final CRC
+> refetch       resume from the first missing chunk
 ```
 
 (Full CLI reference, including how to read the topology map and how to
@@ -216,6 +233,33 @@ mesh_root_command(&mesh, MESH_ID_BROADCAST, arm_payload, n, id, now);
 Telemetry arrives via `cb.on_telemetry` with each node's parent and
 top-3 neighbors — the base's topology map (§5.3) falls straight out.
 
+### Retrieving data
+
+```c
+/* Node side: serve bytes for a FETCH. Returning < max ends the
+ * session, so a short read is the EOF marker. */
+static uint8_t app_on_bulk_read(void *user, uint8_t session,
+                                uint32_t offset, uint8_t *buf,
+                                uint8_t max) {
+    return sd_read(event_base + offset, buf, max);  /* your storage */
+}
+
+/* Base side: request a range; chunks arrive via cb.on_bulk_data with
+ * an index relative to base_offset. */
+mesh_root_fetch(&mesh, node, session, base_off, base_off, len,
+                MESH_BULK_CHUNK, now);
+
+/* To fill gaps, re-FETCH the missing sub-range under the SAME session
+ * and base_offset — indices stay aligned, so the bitmap just fills in: */
+mesh_root_fetch(&mesh, node, session, base_off, gap_off, gap_len,
+                MESH_BULK_CHUNK, now);
+```
+
+The base owns completion: which indices arrived, when to re-FETCH, and
+the end-to-end CRC over the reassembled bytes. The library moves chunks
+and verifies each one; it deliberately holds no session state at the
+base and only a cursor at the node.
+
 ## Testing
 
 - **Unit tests** cover the frame codec (bounds, foreign-network drop,
@@ -223,9 +267,12 @@ top-3 neighbors — the base's topology map (§5.3) falls straight out.
   vectors, per-byte tamper rejection, wrong-key rejection), the ETX
   estimator (perfect/half/decaying links, fresh restart, staleness),
   parent selection (hysteresis, loop guard, failover), flooding (dedup,
-  TTL, targeted execution, re-flood re-ACK, retry exhaustion), and the
-  RYLR998 driver core (config sequence, hex round-trip, +RCV parsing,
-  busy gating, module-reset recovery).
+  TTL, targeted execution, re-flood re-ACK, retry exhaustion), bulk
+  retrieval (CRC16 known-answer, FETCH argument validation, chunk
+  streaming with single-in-flight discipline, re-FETCH session
+  replacement, EOF short reads, root-side CRC gate), and the RYLR998
+  driver core (config sequence, hex round-trip, +RCV parsing, busy
+  gating, module-reset recovery).
 - **Scenario tests** run whole fleets on the simulator: 10-node tree
   formation, deterministic relay-death self-healing with hysteresis-gated
   re-optimization, a 20 %-loss 6-node line flood with exactly-once
@@ -235,6 +282,12 @@ top-3 neighbors — the base's topology map (§5.3) falls straight out.
   between superframes, synchronized mode switch). A 25-seed sweep of
   the scheduled scenario shows zero frames ever transmitted into a
   sleeping receiver — window gating and the listen schedule agree.
+- **Bulk + replay scenarios:** a 2000-byte retrieval from the far end of
+  a lossy 4-node line, with the base re-FETCHing gaps until its bitmap
+  fills and the reassembled bytes matching the source exactly; and the
+  full production stack (CMAC MIC + scheduler + bulk window) retrieving
+  data with zero MIC drops, then rejecting a frame captured off the air
+  and replayed three superframes later.
 - The protocol was additionally validated with a 25-seed randomized sweep
   of the healing and lossy-flood scenarios (50 runs, 0 failures); the
   committed tests use fixed seeds and are fully deterministic.
@@ -283,18 +336,20 @@ gap (§10.2).
 |---|---|---|
 | **M1: Core mesh** | frame codec, radio HAL, ETX + collection tree, command flooding + ACKs, telemetry, host simulator | **done** |
 | **M2: Superframe scheduler** | GPS-time-aligned windows (beacon/command/telemetry/bulk), duty-cycled listening, standby/active modes (§4) | **done** |
-| **M3: Bulk transfer** | chunked FETCH sessions, store-and-forward burst relaying, selective-ACK bitmaps, resumption by session id (§7) | planned |
-| **M4: Link security** | AES-128-CMAC MIC **done** (RFC 4493 KAT-verified, used by tests/demo/examples); replay protection + key provisioning workflow remain (§10.2 Rev B) | **partial** |
+| **M3: Bulk transfer** | chunked FETCH sessions with single-chunk tree unicast, per-chunk CRC, base-driven resumption by byte range (§7) **done**; store-and-forward burst pipelining + selective-ACK bitmaps deferred | **done (first cut)** |
+| **M4: Link security** | AES-128-CMAC MIC **done** (RFC 4493 KAT-verified); superframe-bound replay protection **done** (§10.2, needs GPS time to be active in the field); key provisioning workflow remains | **partial** |
 | **M5: Pico port** | RYLR998 driver + field-node/base examples **done** (cross-built with pico-sdk); GPS/PPS time source and flash route cache (§5.3) remain | **partial** |
 | **M6: Base-station tooling** | topology map, retrieval scheduler, fleet checklist/retry policy on the base server (the base_station example CLI is the embryo) | planned |
 
 ## Current caveats (read before fielding)
 
-- **Frames are authenticated but not replay-protected.** The
-  AES-128-CMAC MIC stops forgery, but a recorded valid frame can be
-  retransmitted later; the exec-dedup cache and ARM validity windows
-  blunt this without closing it (§10.2 Rev B). Fix lands with the M2
-  wire-format revision.
+- **Replay protection is implemented but dormant without GPS.** The
+  superframe-bound MIC closes the replay gap (§10.2) — but only when the
+  scheduler is enabled, since it binds the *shared* superframe index.
+  The example firmware free-runs on its boot clock, so today it gets
+  authentication without replay protection; both the scheduler and this
+  binding go live with the GPS/PPS time source (M5). ARM validity
+  windows remain the application-layer backstop meanwhile.
 - **The examples compile the network key in** (`node_config.h`) — fine
   for the bench, not a production provisioning flow. Change the key per
   deployment; whoever has it can inject ARM commands. The null MIC still
@@ -308,7 +363,75 @@ gap (§10.2).
   `mesh_sched_clock_uncertainty()`.
 - Neighbor/route state is RAM-only; the §5.3 flash cache for instant
   post-reboot route resumption comes with the Pico port (M5).
-- `DATA`/`DATA_ACK`/`SESSION` frame types are reserved but unimplemented
-  (M3); over the RYLR998's hex transport, frames cap at 120 bytes
-  (§3.4/§8 Rev B) — irrelevant for control traffic, relevant for M3
-  chunk sizing.
+- **Bulk retrieval is correct but unpipelined.** One chunk is in flight
+  per node, so throughput is round-trip-bound rather than air-time-bound
+  — fine at the design's minutes-to-hours latency budget, and the first
+  thing to revisit if retrieval time becomes the constraint. Burst
+  relaying with selective-ACK bitmaps (§7.3 in full) is the follow-on;
+  `DATA_ACK` is reserved for it.
+- **Bulk needs a bulk window.** With the scheduler on, chunks only move
+  during the §4 bulk window, and neither stock mode defines one — the
+  fleet must be switched to a retrieval mode first (a `mesh_root_fetch`
+  in a mode without a bulk window fails immediately rather than queueing
+  forever). Deciding that policy is §7.4 / M6 work.
+- Over the RYLR998's hex transport, frames cap at 120 bytes (§3.4/§8
+  Rev B) — irrelevant for control traffic; it is why the default bulk
+  chunk is 96 bytes.
+
+## Kanban cards
+
+One card per line, ready to paste into a board. Design-doc sections in
+parentheses.
+
+### Ideas
+
+- Store-and-forward burst relaying: W-chunk bursts + per-hop selective-ACK
+  bitmaps for bulk throughput (§7.3 full) — the M3 follow-on
+- On-wire NACK bitmaps for scattered chunk loss (vs. range re-FETCH)
+- Concurrent bulk sessions per node (needs §7.4 scheduling to pay off)
+- Qualify off-spec binary AT payloads on the RYLR998, or move bulk-heavy
+  deployments to an SPI-attached radio (§13 Q7)
+- Second radio module per node for a concurrent bulk channel (§13 Q3)
+- Mobile/vehicle-mounted base station mode to shorten retrieval hops (§13 Q4)
+- Optional AES-CTR payload encryption on top of the MIC (§10.2)
+- On-node delta encoding + per-block compression of event windows (§7.2)
+- Parallel retrieval from radio-independent branches in TDMA slots (§7.4)
+- Decide RECORDING-state radio policy: fully silent vs. beacon-listen (§13 Q2)
+- Per-deployment regulatory review: band, dwell-time/duty-cycle rules (§13 Q1)
+
+### Todo
+
+- Key provisioning workflow — per-deployment key rotation instead of
+  compiled-in key (M4 remainder, §13 Q5)
+- GPS/PPS time source for the example firmware; enable the scheduler,
+  absolute ARM validity windows, and replay protection in the field
+  (M5 remainder — replay protection is dormant until this lands)
+- Bulk-window scheduling policy: who opens the retrieval window and when
+  (§7.4 / §13 Q8)
+- Flash cache of neighbor table + parent for instant post-reboot routing
+  (M5 remainder, §5.3)
+- Base-station tooling: topology map, retrieval scheduler, fleet
+  checklist/retry policy on a real computer (M6)
+- Field validation on real air: range, collisions, SF margins (M5)
+- Integrate the mesh into the production logger firmware (SD, sensors,
+  §9 state machine)
+
+### In progress
+
+- (nothing — M3 landed; next milestone not yet started)
+
+### Done
+
+- M1 core mesh: codec, ETX collection tree, command flooding + ACKs,
+  telemetry, host simulator
+- M2 superframe scheduler: GPS-aligned windows, duty-cycled listening,
+  fleet-synchronized mode switches
+- M3 bulk retrieval (first cut): FETCH sessions, single-chunk tree
+  unicast, per-chunk CRC, base-driven range resumption
+- Replay protection: superframe-bound MIC, sealed at transmit time,
+  ±1 verify, no wire-format change (§10.2)
+- AES-128-CMAC MIC (RFC 4493, KAT-verified)
+- RYLR998 AT-protocol driver (host-tested) + Pico UART glue
+- Example field-node + base-station firmware, cross-built UF2s
+- Base-station CLI + reference doc (examples/BASE_STATION_COMMANDS.md)
+- Design doc Rev B: M1/M2 findings folded back into the spec

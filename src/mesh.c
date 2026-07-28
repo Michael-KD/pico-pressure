@@ -70,8 +70,18 @@ void mesh_rx(mesh_t *m, const uint8_t *data, size_t len,
     if (!m || !m->initialized || !data)
         return;
 
+    /* With the scheduler on, the MIC binds the sender's transmit-time
+     * superframe index (§10.2); verify against ours ± the straddle
+     * tolerance. Scheduler off: both sides use a constant 0. */
+    uint32_t sf_center = 0, sf_tol = 0;
+    if (m->sched.enabled) {
+        sf_center = mesh_sched_superframe(m, now_us);
+        sf_tol = MESH_MIC_SF_TOLERANCE;
+    }
+
     mesh_frame_t f;
-    switch (mesh_frame_parse(m->network_id, &m->mic, data, len, &f)) {
+    switch (mesh_frame_parse_sf(m->network_id, &m->mic, data, len,
+                                sf_center, sf_tol, &f)) {
     case MESH_FRAME_OK:
         break;
     case MESH_FRAME_E_LEN:
@@ -103,14 +113,18 @@ void mesh_rx(mesh_t *m, const uint8_t *data, size_t len,
         break;
     case MESH_FT_CMD_ACK:
     case MESH_FT_TELEM:
+    case MESH_FT_DATA:
         mesh_up_rx(m, &f, now_us);
+        break;
+    case MESH_FT_SESSION:
+        mesh_flood_rx(m, &f, now_us);
         break;
     case MESH_FT_HOP_ACK:
         mesh_hop_ack_rx(m, &f);
         break;
     default:
-        /* DATA/DATA_ACK/SESSION are reserved for the bulk-transfer
-         * milestone; unknown types are ignored. */
+        /* DATA_ACK is reserved for store-and-forward bursts; unknown
+         * types are ignored. */
         break;
     }
 }
@@ -120,8 +134,11 @@ uint64_t mesh_poll(mesh_t *m, uint64_t now_us)
     if (!m || !m->initialized)
         return MESH_NO_EVENT;
     /* Scheduler first: it may switch modes, toggle the radio, or
-     * originate the root beacon that the queue pass then transmits. */
+     * originate the root beacon that the queue pass then transmits.
+     * The bulk pump runs before the queue so a freshly emitted chunk
+     * can fire in this same poll. */
     uint64_t next = mesh_sched_poll(m, now_us);
+    mesh_bulk_pump(m, now_us);
     uint64_t tx = mesh_txq_poll(m, now_us);
     return tx < next ? tx : next;
 }
