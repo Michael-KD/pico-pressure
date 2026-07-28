@@ -28,8 +28,33 @@ TELEM: node 2 (parent 1, standby, 4.9V, 31C)
 | `fetch <node> [bytes]` | Retrieves the node's event data over the mesh (default 4096 bytes, 96-byte chunks). Progress prints as `DATA: chunk …` lines; on completion the base prints a CRC16 to compare against the node's index line. |
 | `refetch` | Re-requests the current fetch **from the first missing chunk** — the §7.3 resumption mechanism. Chunks already received are kept; repeat until `fstat` says complete. |
 | `fstat` | Fetch progress: chunks received, the missing-chunk list, and the final CRC once complete. |
+| `provision <id> <netid> <key>` | Writes this device's identity + network key to flash and reboots (see below). `provision show` prints what's stored; `provision clear` erases it. |
 
 Anything else prints a one-line usage reminder.
+
+## Provisioning (one UF2 for every device)
+
+Identity and the AES-CMAC network key live in a **flash provisioning
+blob**, not in the firmware image — flash the same UF2 everywhere, then
+personalize each device once over its own USB serial (both firmwares
+accept the same command; the field node's log console doubles as its
+CLI):
+
+```
+> provision 3 D5E7 8f3a9c01d24be677a1509b8c33ef1d42
+provisioned node 3 net D5E7; rebooting to apply...
+```
+
+- Generate the key on your PC — `openssl rand -hex 16` — and use the
+  **same key and netid on every device** in the deployment; give each
+  device a **unique id** (0 = the base station, 1–254 = field nodes).
+- Key rotation is just re-provisioning each device. No rebuild.
+- An unprovisioned device falls back to the compiled
+  [node_config.h](node_config.h) defaults and says so at boot — fine on
+  the bench, never in the field.
+- The blob is plaintext in flash and the RP2040 has no readout
+  protection: physical possession of a node yields the key, so rotate
+  the deployment key if a node is lost (design doc §10.2).
 
 ## Reading `top`
 
@@ -60,8 +85,8 @@ nodes the base can't hear directly. Each node executes it **exactly
 once** (repeat floods are recognized by command ID) and sends an ACK
 back hop-by-hop through the tree. The base never assumes delivery —
 that's what the checklist is for. All frames are authenticated with
-AES-128-CMAC under the key in [node_config.h](node_config.h); a node
-with the wrong key can neither read nor issue commands.
+AES-128-CMAC under the provisioned network key; a node with the wrong
+key can neither read nor issue commands.
 
 ## Retrieving data (30-second version)
 

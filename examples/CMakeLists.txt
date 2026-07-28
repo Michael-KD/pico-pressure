@@ -40,9 +40,26 @@ target_link_libraries(rylr998 PUBLIC
     hardware_irq
 )
 
+# Flash provisioning: portable blob codec (host-tested from tests/) +
+# Pico flash-slot store + the shared `provision` CLI command (M4).
+add_library(provision STATIC
+    provision.c
+    provision_cli.c
+    flash_store.c
+)
+target_include_directories(provision PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(provision PUBLIC
+    mesh
+    pico_stdlib
+    hardware_flash
+    hardware_sync
+    hardware_watchdog
+)
+
 function(mesh_example name)
     add_executable(${name} ${ARGN})
-    target_link_libraries(${name} PRIVATE mesh rylr998 pico_stdlib)
+    target_link_libraries(${name} PRIVATE mesh rylr998 provision
+        pico_stdlib)
     target_compile_options(${name} PRIVATE -Wall -Wextra)
     # Logs and (for the base station) the CLI go over USB serial.
     pico_enable_stdio_usb(${name} 1)

@@ -129,7 +129,10 @@ src/
 examples/                     standalone pico-sdk project (see below)
   main.c                      field-node firmware (Pico + RYLR998)
   base_station.c              base-gateway firmware with USB-serial CLI
-  node_config.h               per-device/deployment provisioning (ID, key, pins)
+  node_config.h               deployment radio/timing config + bench fallbacks
+  provision.[ch]              flash provisioning blob codec (ID + net + key)
+  provision_cli.c             `provision` CLI command (both firmwares)
+  flash_store.[ch]            fixed-slot blob store in the Pico's flash
   rylr998_pico.[ch]           Pico UART/IRQ glue for the radio driver
   radios/RYLR998/             portable AT-protocol driver core + datasheets
 tests/
@@ -148,7 +151,7 @@ Build and test on any Linux host (WSL Ubuntu works; needs `cmake`,
 ```sh
 cmake -B build -G Ninja
 cmake --build build
-ctest --test-dir build            # 9 suites, all green
+ctest --test-dir build            # 10 suites, all green
 ./build/tests/mesh_demo           # watch a 10-node fleet form, flood, heal
 ```
 
@@ -170,9 +173,16 @@ cmake --build examples/build
 ```
 
 Flash `mesh_base_station.uf2` to one Pico and `mesh_field_node.uf2` to
-the others — **set a unique `NODE_ID` in `examples/node_config.h` per
-field device** (and change the network key for anything beyond the
-bench). Wire each RYLR998 to 3V3/GND, GP4→RXD, GP5←TXD (and GP6→NRST,
+the others — the **same UF2 serves every field node**. Personalize each
+device once over its USB serial (`openssl rand -hex 16` makes the key;
+same key + netid fleet-wide, unique id per device):
+
+```
+> provision 3 D5E7 8f3a9c01d24be677a1509b8c33ef1d42
+```
+
+Unprovisioned devices fall back to the compiled `node_config.h` bench
+identity. Wire each RYLR998 to 3V3/GND, GP4→RXD, GP5←TXD (and GP6→NRST,
 optional). The base station gives you a CLI on USB serial:
 
 ```
@@ -191,9 +201,10 @@ optional). The base station gives you a CLI on USB serial:
 add new commands:
 [examples/BASE_STATION_COMMANDS.md](examples/BASE_STATION_COMMANDS.md).)
 
-All frames are authenticated with AES-128-CMAC under the key in
-`node_config.h`. Field nodes blink fast while searching and slow once
-attached, and log everything on their own USB port.
+All frames are authenticated with AES-128-CMAC under the provisioned
+key. Field nodes blink fast while searching and slow once attached, and
+log everything on their own USB port (which also accepts `provision`
+and `stats`).
 
 The driver split is deliberate: `radios/RYLR998/rylr998.[ch]` is the
 platform-free AT-protocol state machine (hex framing, +RCV parsing,
@@ -270,9 +281,10 @@ base and only a cursor at the node.
   TTL, targeted execution, re-flood re-ACK, retry exhaustion), bulk
   retrieval (CRC16 known-answer, FETCH argument validation, chunk
   streaming with single-in-flight discipline, re-FETCH session
-  replacement, EOF short reads, root-side CRC gate), and the RYLR998
+  replacement, EOF short reads, root-side CRC gate), the RYLR998
   driver core (config sequence, hex round-trip, +RCV parsing, busy
-  gating, module-reset recovery).
+  gating, module-reset recovery), and the provisioning blob codec
+  (round-trip, per-byte corruption rejection, key-hex parsing).
 - **Scenario tests** run whole fleets on the simulator: 10-node tree
   formation, deterministic relay-death self-healing with hysteresis-gated
   re-optimization, a 20 %-loss 6-node line flood with exactly-once
@@ -337,7 +349,7 @@ gap (§10.2).
 | **M1: Core mesh** | frame codec, radio HAL, ETX + collection tree, command flooding + ACKs, telemetry, host simulator | **done** |
 | **M2: Superframe scheduler** | GPS-time-aligned windows (beacon/command/telemetry/bulk), duty-cycled listening, standby/active modes (§4) | **done** |
 | **M3: Bulk transfer** | chunked FETCH sessions with single-chunk tree unicast, per-chunk CRC, base-driven resumption by byte range (§7) **done**; store-and-forward burst pipelining + selective-ACK bitmaps deferred | **done (first cut)** |
-| **M4: Link security** | AES-128-CMAC MIC **done** (RFC 4493 KAT-verified); superframe-bound replay protection **done** (§10.2, needs GPS time to be active in the field); key provisioning workflow remains | **partial** |
+| **M4: Link security** | AES-128-CMAC MIC (RFC 4493 KAT-verified); superframe-bound replay protection (§10.2, needs GPS time to be active in the field); flash key-provisioning workflow (`provision` CLI, one UF2 per fleet) | **done** |
 | **M5: Pico port** | RYLR998 driver + field-node/base examples **done** (cross-built with pico-sdk); GPS/PPS time source and flash route cache (§5.3) remain | **partial** |
 | **M6: Base-station tooling** | topology map, retrieval scheduler, fleet checklist/retry policy on the base server (the base_station example CLI is the embryo) | planned |
 
@@ -350,10 +362,13 @@ gap (§10.2).
   authentication without replay protection; both the scheduler and this
   binding go live with the GPS/PPS time source (M5). ARM validity
   windows remain the application-layer backstop meanwhile.
-- **The examples compile the network key in** (`node_config.h`) — fine
-  for the bench, not a production provisioning flow. Change the key per
-  deployment; whoever has it can inject ARM commands. The null MIC still
-  exists for the simulator — never field it.
+- **The key lives in plaintext flash.** Provisioning (M4) keeps the key
+  out of the firmware image, but the RP2040 has no secure storage or
+  readout protection — physical possession of a node yields the key, so
+  rotate the deployment key if a node is lost. Whoever has the key can
+  inject ARM commands. The null MIC still exists for the simulator —
+  never field it. An unprovisioned device falls back to the compiled
+  `node_config.h` bench key and says so at boot.
 - **The scheduler needs a shared clock.** Superframe alignment assumes
   every node's `now_us` is the same GPS-disciplined timebase. The
   example firmware clocks from `time_us_64()` (µs since boot,
@@ -401,8 +416,6 @@ parentheses.
 
 ### Todo
 
-- Key provisioning workflow — per-deployment key rotation instead of
-  compiled-in key (M4 remainder, §13 Q5)
 - GPS/PPS time source for the example firmware; enable the scheduler,
   absolute ARM validity windows, and replay protection in the field
   (M5 remainder — replay protection is dormant until this lands)
@@ -418,10 +431,12 @@ parentheses.
 
 ### In progress
 
-- (nothing — M3 landed; next milestone not yet started)
+- (nothing — M4 landed; M5 GPS remainder is next)
 
 ### Done
 
+- M4 key provisioning: flash blob + `provision` CLI on both firmwares,
+  one generic UF2 per fleet, PC-generated keys (§13 Q5)
 - M1 core mesh: codec, ETX collection tree, command flooding + ACKs,
   telemetry, host simulator
 - M2 superframe scheduler: GPS-aligned windows, duty-cycled listening,

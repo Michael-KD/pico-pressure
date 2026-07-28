@@ -30,6 +30,7 @@
 
 #include "mesh/mesh.h"
 #include "node_config.h"
+#include "provision_cli.h"
 #include "rylr998_pico.h"
 
 static mesh_t mesh;
@@ -300,7 +301,9 @@ static void print_stats(void)
 
 static void run_cli_line(char *line)
 {
-    if (strncmp(line, "arm", 3) == 0) {
+    if (provision_cli(line)) {
+        /* identity/key management (M4) — handled in provision_cli.c */
+    } else if (strncmp(line, "arm", 3) == 0) {
         unsigned minutes = 60;
         (void)sscanf(line + 3, "%u", &minutes);
         uint8_t pl[3] = { 'A', (uint8_t)(minutes & 0xFF),
@@ -352,7 +355,7 @@ static void run_cli_line(char *line)
     } else if (line[0] != '\0') {
         printf("commands: arm [min] | disarm | status | resend | top | "
                "stats | list <n> | fetch <n> [bytes] | refetch | "
-               "fstat\n");
+               "fstat | provision\n");
     }
 }
 
@@ -386,6 +389,15 @@ int main(void)
 
     uint64_t now = time_us_64();
 
+    /* Identity + network key: from the flash provisioning blob when one
+     * is stored (M4), else the compiled node_config.h bench defaults.
+     * The base always runs as node 0 regardless of the blob's ID. */
+    prov_t prov;
+    provision_boot(&prov, MESH_ID_ROOT);
+    if (prov.node_id != MESH_ID_ROOT)
+        printf("note: blob says node %u, but base firmware is always "
+               "node 0 (using the blob's net+key)\n", prov.node_id);
+
     rylr998_cfg_t rcfg = {
         .address = MESH_ID_ROOT,
         .network_id = RADIO_MODULE_NETID,
@@ -398,12 +410,11 @@ int main(void)
     };
     rylr998_pico_init(&radio, &rcfg, on_radio_frame, NULL, now);
 
-    static const uint8_t key[16] = MESH_NET_KEY;
-    mesh_mic_cmac_init(&cmac, key);
+    mesh_mic_cmac_init(&cmac, prov.key);
 
     mesh_cfg_t cfg = {
         .node_id = MESH_ID_ROOT,
-        .network_id = MESH_NET_ID,
+        .network_id = prov.net_id,
         .radio = rylr998_radio_ops(&radio),
         .mic = mesh_mic_cmac_ops(&cmac),
         .cb = {

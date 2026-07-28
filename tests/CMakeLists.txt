@@ -28,6 +28,13 @@ mesh_add_test(test_rylr998 unit/test_rylr998.c
 target_include_directories(test_rylr998 PRIVATE
     ${CMAKE_SOURCE_DIR}/examples/radios/RYLR998)
 
+# Likewise the provisioning-blob codec (the flash and CLI glue are
+# Pico-only).
+mesh_add_test(test_provision unit/test_provision.c
+    ${CMAKE_SOURCE_DIR}/examples/provision.c)
+target_include_directories(test_provision PRIVATE
+    ${CMAKE_SOURCE_DIR}/examples)
+
 mesh_add_test(test_scenarios sim/test_scenarios.c sim/sim_net.c)
 target_include_directories(test_scenarios PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/sim)

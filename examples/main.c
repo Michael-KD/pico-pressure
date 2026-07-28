@@ -4,8 +4,9 @@
  * A real field device built on the mesh library: joins the collection
  * tree, executes flooded commands (simplified ARM/DISARM/STATUS from
  * design doc §6), and reports telemetry up the tree. All frames are
- * authenticated with AES-128-CMAC under the pre-shared network key in
- * node_config.h.
+ * authenticated with AES-128-CMAC under the pre-shared network key —
+ * from the flash provisioning blob (`provision` on the USB CLI, M4),
+ * falling back to the node_config.h bench defaults.
  *
  * What is deliberately simplified relative to the production firmware:
  *   - Time: time_us_64() (µs since boot) instead of GPS-disciplined
@@ -23,7 +24,8 @@
  *     trace instead of real event windows off the SD card, so
  *     retrieval can be exercised and CRC-verified on the bench.
  *
- * Set NODE_ID in node_config.h (unique per device!) before flashing.
+ * Flash the same UF2 to every field node, then personalize each over
+ * USB serial: `provision <id> <netid> <key>` (unique ID per device!).
  * Logs go to USB serial.
  */
 #include <stdio.h>
@@ -35,11 +37,16 @@
 
 #include "mesh/mesh.h"
 #include "node_config.h"
+#include "provision_cli.h"
 #include "rylr998_pico.h"
 
 static mesh_t mesh;
 static rylr998_t radio;
 static mesh_mic_cmac_t cmac;
+
+/* Runtime identity: the flash provisioning blob when present (M4), else
+ * the compiled NODE_ID bench default. */
+static uint8_t node_id;
 
 /* ---- application state (simplified §9) ---- */
 
@@ -93,7 +100,7 @@ static void send_telemetry(uint64_t now)
 
 static uint8_t event_byte(uint32_t off)
 {
-    return (uint8_t)(0x80 ^ (uint8_t)(NODE_ID * 37) ^
+    return (uint8_t)(0x80 ^ (uint8_t)(node_id * 37) ^
                      (uint8_t)(off * 13) ^ (uint8_t)(off >> 5));
 }
 
@@ -127,7 +134,7 @@ static uint8_t on_bulk_read(void *user, uint8_t session, uint32_t off,
         /* LIST: one index line; a short read marks its end. */
         char idx[64];
         int n = snprintf(idx, sizeof(idx), "node %u: evt 1, %u B, "
-                         "crc16 %04X", NODE_ID, (unsigned)EVENT_LEN,
+                         "crc16 %04X", node_id, (unsigned)EVENT_LEN,
                          event_crc16());
         while (i < max && off + i < (uint32_t)n) {
             buf[i] = (uint8_t)idx[off + i];
@@ -209,6 +216,48 @@ static void led_tick(uint64_t now)
     gpio_put(PICO_DEFAULT_LED_PIN, (now / period) & 1);
 }
 
+/* ---- minimal CLI: provisioning + diagnostics (M4) ----
+ * The field node's USB serial is primarily a log, but it accepts enough
+ * of a CLI to personalize a freshly flashed generic UF2. */
+
+static void run_cli_line(char *line)
+{
+    if (provision_cli(line))
+        return;
+    if (strcmp(line, "stats") == 0) {
+        const mesh_stats_t *s = mesh_stats_get(&mesh);
+        printf("mesh: rx %lu (drop mic %lu) tx %lu parent %u "
+               "cost %u.%02u\n", (unsigned long)s->rx_frames,
+               (unsigned long)s->rx_drop_mic,
+               (unsigned long)s->tx_frames, mesh_parent(&mesh),
+               mesh_path_cost(&mesh) >> 8,
+               ((mesh_path_cost(&mesh) & 0xFF) * 100) >> 8);
+    } else if (line[0] != '\0') {
+        printf("commands: provision [show|clear|<id> <netid> <key>] | "
+               "stats\n");
+    }
+}
+
+static void cli_tick(void)
+{
+    static char line[80];
+    static unsigned len;
+    for (;;) {
+        int c = getchar_timeout_us(0);
+        if (c == PICO_ERROR_TIMEOUT)
+            return;
+        if (c == '\r' || c == '\n') {
+            printf("\n");
+            line[len] = '\0';
+            len = 0;
+            run_cli_line(line);
+        } else if (len < sizeof(line) - 1 && c >= 0x20 && c < 0x7F) {
+            line[len++] = (char)c;
+            putchar(c); /* echo */
+        }
+    }
+}
+
 int main(void)
 {
     stdio_init_all();
@@ -218,11 +267,24 @@ int main(void)
     gpio_set_dir(PICO_DEFAULT_LED_PIN, GPIO_OUT);
 
     uint64_t now = time_us_64();
-    printf("\n=== blast-sensor field node %u ===\n", NODE_ID);
+
+    /* Identity + network key (M4): flash provisioning blob if present,
+     * else the compiled bench defaults. A blob claiming node 0 is a
+     * base-station blob on field firmware — ignore its ID. */
+    prov_t prov;
+    provision_boot(&prov, NODE_ID);
+    if (prov.node_id == MESH_ID_ROOT) {
+        printf("blob says node 0 (base) but this is field firmware; "
+               "using compiled NODE_ID %u\n", NODE_ID);
+        prov.node_id = NODE_ID;
+    }
+    node_id = prov.node_id;
+
+    printf("\n=== blast-sensor field node %u ===\n", node_id);
 
     /* Radio: bring the RYLR998 up with the deployment RF profile. */
     rylr998_cfg_t rcfg = {
-        .address = NODE_ID, /* module addr = node ID (debug nicety) */
+        .address = node_id, /* module addr = node ID (debug nicety) */
         .network_id = RADIO_MODULE_NETID,
         .band_hz = RADIO_BAND_HZ,
         .sf = RADIO_SF,
@@ -234,19 +296,18 @@ int main(void)
     rylr998_pico_init(&radio, &rcfg, on_radio_frame, NULL, now);
 
     /* MIC: real AES-128-CMAC under the deployment key. */
-    static const uint8_t key[16] = MESH_NET_KEY;
-    mesh_mic_cmac_init(&cmac, key);
+    mesh_mic_cmac_init(&cmac, prov.key);
 
     /* RNG seed must differ per node: mix the flash unique ID. */
     pico_unique_board_id_t uid;
     pico_get_unique_board_id(&uid);
-    uint32_t seed = 0x9E3779B9u * (NODE_ID + 1);
+    uint32_t seed = 0x9E3779B9u * (uint32_t)(node_id + 1);
     for (unsigned i = 0; i < PICO_UNIQUE_BOARD_ID_SIZE_BYTES; i++)
         seed = seed * 31 + uid.id[i];
 
     mesh_cfg_t cfg = {
-        .node_id = NODE_ID,
-        .network_id = MESH_NET_ID,
+        .node_id = node_id,
+        .network_id = prov.net_id,
         .radio = rylr998_radio_ops(&radio),
         .mic = mesh_mic_cmac_ops(&cmac),
         .cb = {
@@ -292,6 +353,7 @@ int main(void)
             mesh_poll(&mesh, now); /* flush the enqueued report */
         }
 
+        cli_tick();
         led_tick(now);
         /* Busy loop: with the scheduler enabled (M5, once GPS lands)
          * this becomes a sleep until mesh_poll's returned deadline. */

@@ -1,14 +1,17 @@
 /*
- * node_config.h — per-device and per-deployment provisioning for the
- * example firmware (field node and base station).
+ * node_config.h — compiled configuration for the example firmware
+ * (field node and base station).
  *
- * In a production flow these values come from provisioning flash; for
- * the examples, edit here and rebuild per device.
+ * Identity and the network key are normally provisioned into flash over
+ * USB serial (`provision` on either firmware's CLI — M4) so one UF2
+ * serves every device; the identity values below are bench-only
+ * FALLBACKS used when no provisioning blob is stored. The radio/timing
+ * settings further down are deployment-wide and stay compiled in.
  */
 #ifndef NODE_CONFIG_H
 #define NODE_CONFIG_H
 
-/* ---- identity (EDIT PER DEVICE) ---- */
+/* ---- identity fallbacks (used only when unprovisioned) ---- */
 
 /* Field-node ID, 1..254 — must be unique in the deployment. The base
  * station firmware ignores this and always runs as node 0. */
@@ -19,9 +22,10 @@
 /* Mesh network ID (in-frame, 2 bytes) — not the radio module's. */
 #define MESH_NET_ID 0xD5E7
 
-/* Pre-shared AES-128 network key for the frame MIC (§10.2).
- * CHANGE THIS for any real deployment and keep it out of version
- * control; with a known key anyone can inject ARM commands. */
+/* Pre-shared AES-128 network key for the frame MIC (§10.2) — bench
+ * fallback only. Real deployments provision a key generated on the PC
+ * (`openssl rand -hex 16`) into flash instead; with a known key anyone
+ * can inject ARM commands. */
 #define MESH_NET_KEY                                                    \
     {                                                                   \
         0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,                 \
