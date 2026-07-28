@@ -145,6 +145,9 @@ examples/                     standalone pico-sdk project (see below)
   gps_pico.[ch]               UART/PPS-IRQ glue for the GPS receiver
   rylr998_pico.[ch]           Pico UART/IRQ glue for the radio driver
   radios/RYLR998/             portable AT-protocol driver core + datasheets
+web/
+  index.html                  Blast Mesh Console — interactive browser model
+                              of the protocol (open the file directly; no server)
 tests/
   unit/                       frame / MIC / sched / neighbor / tree / flood / bulk / driver tests
   sim/sim_net.[ch]            multi-node simulator: virtual clock, lossy links
@@ -169,6 +172,13 @@ The demo prints the collection tree as it forms, floods an ARM command
 and shows the ACK checklist, then kills a relay node and shows the
 orphaned branch re-routing around it — and re-optimizing after the relay
 revives.
+
+For a visual version of the same story, open
+[web/index.html](web/index.html) in a browser — an interactive console
+that models the protocol (tree formation, flooding, superframe windows,
+bulk retrieval, replay testing) with draggable nodes and per-function
+test buttons. It illustrates the design doc; the C library and its
+simulator remain the authority.
 
 ### Running it on real hardware (Pico + RYLR998)
 
