@@ -247,6 +247,11 @@ void sim_revive(sim_net_t *s, uint8_t id)
     s->nodes[id].alive = true;
 }
 
+void sim_reboot(sim_net_t *s, uint8_t id)
+{
+    sim_node_setup(s, id, s->mic);
+}
+
 mesh_t *sim_mesh(sim_net_t *s, uint8_t id)
 {
     return &s->nodes[id].mesh;

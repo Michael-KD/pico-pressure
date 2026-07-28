@@ -20,6 +20,7 @@ mesh_add_test(test_tree unit/test_tree.c)
 mesh_add_test(test_flood unit/test_flood.c)
 mesh_add_test(test_sched unit/test_sched.c)
 mesh_add_test(test_bulk unit/test_bulk.c)
+mesh_add_test(test_persist unit/test_persist.c)
 
 # The RYLR998 example driver core is platform-free, so its AT state
 # machine is tested here on the host (the Pico glue only moves bytes).
@@ -34,6 +35,11 @@ mesh_add_test(test_provision unit/test_provision.c
     ${CMAKE_SOURCE_DIR}/examples/provision.c)
 target_include_directories(test_provision PRIVATE
     ${CMAKE_SOURCE_DIR}/examples)
+
+# And the GPS time source (NMEA + clock discipline; UART/PPS glue is
+# Pico-only).
+mesh_add_test(test_gps unit/test_gps.c ${CMAKE_SOURCE_DIR}/examples/gps.c)
+target_include_directories(test_gps PRIVATE ${CMAKE_SOURCE_DIR}/examples)
 
 mesh_add_test(test_scenarios sim/test_scenarios.c sim/sim_net.c)
 target_include_directories(test_scenarios PRIVATE

@@ -493,6 +493,106 @@ static void test_bulk_scheduled_and_replay_rejected(void)
     T_CHECK_EQ(mesh_stats_get(victim)->rx_frames, frames_before);
 }
 
+static void test_reboot_route_resume(void)
+{
+    /* §5.3 flash route cache: a rebooted node restores its snapshot and
+     * routes immediately — telemetry reaches the base before the node
+     * has heard a single post-reboot beacon. Perfect links keep the
+     * scenario deterministic. */
+    sim_init(&net, 4, 0x5EED);
+    sim_link(&net, 0, 1, 0);
+    sim_link(&net, 1, 2, 0);
+    sim_link(&net, 2, 3, 0);
+    for (int e = 0; e < 8; e++)
+        sim_epoch(&net, SF);
+    T_CHECK(sim_tree_valid(&net));
+    T_CHECK_EQ(mesh_parent(sim_mesh(&net, 3)), 2);
+
+    /* What the firmware would hold in flash. */
+    uint8_t blob[MESH_ROUTE_BLOB_MAX];
+    size_t blen = mesh_route_save(sim_mesh(&net, 3), blob, sizeof(blob));
+    T_CHECK(blen > 0);
+
+    /* Brown-out reboot: fresh mesh, restore, route is back instantly. */
+    sim_reboot(&net, 3);
+    T_CHECK_EQ(mesh_parent(sim_mesh(&net, 3)), MESH_ID_NONE);
+    T_CHECK(mesh_route_load(sim_mesh(&net, 3), blob, blen));
+    T_CHECK_EQ(mesh_parent(sim_mesh(&net, 3)), 2);
+
+    unsigned telem_before = net.telem_count[3];
+    uint8_t pl[1] = { 0x33 };
+    T_CHECK(mesh_node_telemetry(sim_mesh(&net, 3), pl, 1, net.now));
+    sim_run(&net, 3000000); /* no beacon epoch in this window */
+    T_CHECK_EQ(net.telem_count[3], telem_before + 1);
+
+    /* Lazy repair: the restored estimator keeps the tree healthy. */
+    for (int e = 0; e < 4; e++)
+        sim_epoch(&net, SF);
+    T_CHECK(sim_tree_valid(&net));
+
+    /* Down past the staleness threshold instead: the restored route
+     * ages out against fresh beacons (§5.4) and the node re-attaches
+     * from scratch rather than trusting a dead snapshot. */
+    blen = mesh_route_save(sim_mesh(&net, 3), blob, sizeof(blob));
+    T_CHECK(blen > 0);
+    sim_kill(&net, 3);
+    for (int e = 0; e < MESH_STALE_EPOCHS + 3; e++)
+        sim_epoch(&net, SF);
+    sim_reboot(&net, 3);
+    T_CHECK(mesh_route_load(sim_mesh(&net, 3), blob, blen));
+    for (int e = 0; e < 6; e++)
+        sim_epoch(&net, SF);
+    T_CHECK(mesh_parent(sim_mesh(&net, 3)) != MESH_ID_NONE);
+    T_CHECK(sim_tree_valid(&net));
+}
+
+static void test_root_reboot_recovery(void)
+{
+    /* The base power-cycles mid-deployment. Without its saved counters
+     * the new instance beacons from seq 0 — wrap-safe comparison reads
+     * that as OLDER than the fleet's held epoch, every beacon is
+     * discarded as a stale reordered copy, and the tree freezes. With
+     * the counters restored (advanced by MESH_PERSIST_SEQ_MARGIN) the
+     * fleet just sees a forward epoch jump and keeps working. */
+    sim_init(&net, 4, 0x0071);
+    sim_link(&net, 0, 1, 0);
+    sim_link(&net, 1, 2, 0);
+    sim_link(&net, 2, 3, 0);
+    for (int e = 0; e < 30; e++)
+        sim_epoch(&net, SF);
+    T_CHECK(sim_tree_valid(&net));
+
+    uint8_t blob[MESH_ROUTE_BLOB_MAX];
+    size_t blen = mesh_route_save(sim_mesh(&net, 0), blob, sizeof(blob));
+    T_CHECK(blen > 0);
+
+    /* First, demonstrate the failure the persistence exists to fix:
+     * reboot WITHOUT restoring. The fleet's epoch stops advancing. */
+    sim_reboot(&net, 0);
+    uint16_t held = sim_mesh(&net, 1)->net_epoch;
+    for (int e = 0; e < 4; e++)
+        sim_epoch(&net, SF);
+    T_CHECK_EQ(sim_mesh(&net, 1)->net_epoch, held); /* wedged */
+
+    /* Reboot again, this time restoring the counters. */
+    sim_reboot(&net, 0);
+    T_CHECK(mesh_route_load(sim_mesh(&net, 0), blob, blen));
+    for (int e = 0; e < MESH_STALE_EPOCHS + 4; e++)
+        sim_epoch(&net, SF);
+    T_CHECK(mesh_seq_gt(sim_mesh(&net, 1)->net_epoch, held));
+    T_CHECK(sim_tree_valid(&net));
+
+    /* Commands keep executing: flood seq and command IDs restart ahead
+     * of every dedup cache in the fleet. */
+    uint8_t cmd[1] = { 'S' };
+    uint16_t id = mesh_root_command(sim_mesh(&net, 0), MESH_ID_BROADCAST,
+                                    cmd, 1, 0, net.now);
+    T_CHECK(id != 0);
+    sim_run(&net, 8000000);
+    for (unsigned i = 1; i < net.n_nodes; i++)
+        T_CHECK_EQ(net.last_acked_cmd[i], id);
+}
+
 int main(void)
 {
     T_RUN(test_line3_forms_two_hop_tree);
@@ -505,5 +605,7 @@ int main(void)
     T_RUN(test_scheduled_fleet);
     T_RUN(test_bulk_fetch_lossy_multihop);
     T_RUN(test_bulk_scheduled_and_replay_rejected);
+    T_RUN(test_reboot_route_resume);
+    T_RUN(test_root_reboot_recovery);
     return t_summary();
 }

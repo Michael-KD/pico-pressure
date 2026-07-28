@@ -28,6 +28,8 @@
 
 #include "pico/stdlib.h"
 
+#include "flash_store.h"
+#include "gps_pico.h"
 #include "mesh/mesh.h"
 #include "node_config.h"
 #include "provision_cli.h"
@@ -36,6 +38,33 @@
 static mesh_t mesh;
 static rylr998_t radio;
 static mesh_mic_cmac_t cmac;
+static gps_pico_t gpsp;
+
+/* GPS locked at boot: scheduler on, absolute time, auto-beacons. */
+static bool use_gps;
+static uint64_t mono_last;
+
+static uint64_t app_now(void)
+{
+    uint64_t local = time_us_64();
+    if (!use_gps)
+        return local;
+    uint64_t t = gps_now(&gpsp.gps, local);
+    if (t <= mono_last)
+        t = mono_last + 1;
+    mono_last = t;
+    return t;
+}
+
+/* Persist the root's sequence counters so a power-cycled base rejoins
+ * its own fleet instead of beaconing "old" sequence numbers at it. */
+static void save_root_counters(void)
+{
+    uint8_t blob[MESH_ROUTE_BLOB_MAX];
+    size_t bl = mesh_route_save(&mesh, blob, sizeof(blob));
+    if (bl > 0)
+        flash_store_write(FLASH_SLOT_ROUTE, blob, bl);
+}
 
 /* ---- fleet bookkeeping (what the base server would persist) ---- */
 
@@ -58,7 +87,7 @@ static fleet_entry_t fleet[FLEET_MAX];
 
 /* Last flooded command, for `resend` and the ACK checklist. */
 static uint16_t last_cmd_id;
-static uint8_t last_cmd_pl[8];
+static uint8_t last_cmd_pl[24]; /* fits the 17 B absolute-window ARM */
 static uint8_t last_cmd_len;
 
 /* ---- bulk fetch bookkeeping (§7.3: the base holds the bitmap) ---- */
@@ -112,8 +141,10 @@ static void on_telemetry(void *user, const mesh_telem_info_t *info,
         e->temp_c = (int8_t)payload[2];
     }
     e->last_heard_us = time_us_64();
-    printf("TELEM: node %u (parent %u, %s, %u.%uV, %dC)\n", info->origin,
-           info->parent, e->state ? "ARMED" : "standby", e->batt_dv / 10,
+    printf("TELEM: node %u (parent %u, %s, %s, %u.%uV, %dC)\n",
+           info->origin, info->parent,
+           (e->state & 1) ? "ARMED" : "standby",
+           (e->state & 2) ? "gps" : "NO-GPS", e->batt_dv / 10,
            e->batt_dv % 10, e->temp_c);
 }
 
@@ -147,14 +178,14 @@ static void on_radio_frame(void *ctx, const uint8_t *frame, size_t len,
                            int16_t rssi_dbm, int8_t snr_db)
 {
     (void)ctx;
-    mesh_rx(&mesh, frame, len, rssi_dbm, snr_db, time_us_64());
+    mesh_rx(&mesh, frame, len, rssi_dbm, snr_db, app_now());
 }
 
 /* ---- commands ---- */
 
 static void flood(const uint8_t *pl, uint8_t len, uint16_t reuse_id)
 {
-    uint64_t now = time_us_64();
+    uint64_t now = app_now();
     uint16_t id = mesh_root_command(&mesh, MESH_ID_BROADCAST, pl, len,
                                     reuse_id, now);
     if (id == 0) {
@@ -170,6 +201,7 @@ static void flood(const uint8_t *pl, uint8_t len, uint16_t reuse_id)
         last_cmd_len = len;
     }
     mesh_poll(&mesh, now);
+    save_root_counters(); /* command IDs must survive a base reboot */
     printf("flooded cmd %u (%u bytes); watching for ACKs\n", id, len);
 }
 
@@ -182,11 +214,12 @@ static void print_top(void)
         if (!fleet[i].seen)
             continue;
         const fleet_entry_t *e = &fleet[i];
-        printf(" %3u |   %3u  | %-7s | %u.%uV | %3dC | %s\n", i,
-               e->parent, e->state ? "ARMED" : "standby", e->batt_dv / 10,
-               e->batt_dv % 10, e->temp_c,
+        printf(" %3u |   %3u  | %-7s | %u.%uV | %3dC | %s%s\n", i,
+               e->parent, (e->state & 1) ? "ARMED" : "standby",
+               e->batt_dv / 10, e->batt_dv % 10, e->temp_c,
                (e->acked_valid && e->acked_cmd == last_cmd_id) ? "yes"
-                                                               : "NO");
+                                                               : "NO",
+               (e->state & 2) ? "" : "  [no gps]");
         for (unsigned k = 0; k < MESH_TELEM_NBRS; k++) {
             if (e->nbr_id[k] != MESH_ID_NONE)
                 printf("     |        |   sees %u at %u.%02u ETX\n",
@@ -200,7 +233,7 @@ static void print_top(void)
 
 static void start_fetch(uint8_t node, uint32_t bytes)
 {
-    uint64_t now = time_us_64();
+    uint64_t now = app_now();
     if (bytes == 0)
         bytes = 1;
     if (bytes > sizeof(fx.buf))
@@ -245,7 +278,7 @@ static void refetch(void)
         return;
     }
     uint32_t off = (uint32_t)first * fx.chunk;
-    uint64_t now = time_us_64();
+    uint64_t now = app_now();
     if (!mesh_root_fetch(&mesh, fx.target, fx.session, 0, off,
                          fx.total - off, fx.chunk, now)) {
         printf("refetch failed (queue full?)\n");
@@ -306,9 +339,24 @@ static void run_cli_line(char *line)
     } else if (strncmp(line, "arm", 3) == 0) {
         unsigned minutes = 60;
         (void)sscanf(line + 3, "%u", &minutes);
-        uint8_t pl[3] = { 'A', (uint8_t)(minutes & 0xFF),
-                          (uint8_t)(minutes >> 8) };
-        flood(pl, sizeof(pl), 0);
+        if (use_gps) {
+            /* §6.2: absolute GPS validity window <start, stop>. Stale
+             * or replayed copies are inert once the window passes. */
+            uint64_t start = app_now();
+            uint64_t stop = start + (uint64_t)minutes * 60000000ull;
+            uint8_t pl[17];
+            pl[0] = 'A';
+            for (int i = 0; i < 8; i++) {
+                pl[1 + i] = (uint8_t)(start >> (8 * i));
+                pl[9 + i] = (uint8_t)(stop >> (8 * i));
+            }
+            flood(pl, sizeof(pl), 0);
+        } else {
+            /* Bench fallback: duration form. */
+            uint8_t pl[3] = { 'A', (uint8_t)(minutes & 0xFF),
+                              (uint8_t)(minutes >> 8) };
+            flood(pl, sizeof(pl), 0);
+        }
     } else if (strcmp(line, "disarm") == 0) {
         uint8_t pl[1] = { 'D' };
         flood(pl, sizeof(pl), 0);
@@ -330,7 +378,7 @@ static void run_cli_line(char *line)
             /* LIST = bulk session 0 by convention: the node streams its
              * recording index back as text. (This replaces any fetch
              * session in progress on that node — `refetch` resumes.) */
-            uint64_t now = time_us_64();
+            uint64_t now = app_now();
             if (mesh_root_fetch(&mesh, (uint8_t)node, 0, 0, 0, 128, 32,
                                 now))
                 printf("list: asked node %u for its index\n", node);
@@ -412,6 +460,30 @@ int main(void)
 
     mesh_mic_cmac_init(&cmac, prov.key);
 
+    /* GPS (M5): the base anchors the fleet timebase, so it waits for a
+     * lock like every field node. Without one it falls back to bench
+     * mode (application-timed beacons, scheduler off fleet-wide). */
+    gps_pico_init(&gpsp);
+    printf("gps: waiting up to %us for lock...\n",
+           (unsigned)(GPS_WAIT_US / 1000000));
+    uint64_t gps_deadline = time_us_64() + GPS_WAIT_US;
+    while (time_us_64() < gps_deadline) {
+        uint64_t t = time_us_64();
+        gps_pico_pump(&gpsp);
+        rylr998_pico_pump(&radio, t);
+        rylr998_poll(&radio, t);
+        if (gps_locked(&gpsp.gps, t)) {
+            use_gps = true;
+            break;
+        }
+        sleep_ms(2);
+    }
+    if (use_gps)
+        printf("gps: locked%s — scheduler on, auto-beacons\n",
+               gpsp.gps.pps_ever ? " (PPS)" : " (no PPS)");
+    else
+        printf("gps: no lock — bench mode, manual beacon timer\n");
+
     mesh_cfg_t cfg = {
         .node_id = MESH_ID_ROOT,
         .network_id = prov.net_id,
@@ -424,31 +496,56 @@ int main(void)
         },
         .rng_seed = 0xB05EBA5E,
     };
+    if (use_gps) {
+        cfg.sched.enabled = true;
+        cfg.sched.mode = mesh_sched_mode_active();
+        cfg.sched.mode.period_us = SCHED_PERIOD_US;
+        cfg.sched.mode.bulk_win_us = SCHED_BULK_WIN_US;
+    }
     if (!mesh_init(&mesh, &cfg)) {
         printf("mesh_init failed (bad config)\n");
         for (;;)
             tight_loop_contents();
     }
 
+    /* Restore the root's persisted sequence counters (advanced by the
+     * safety margin) so this reboot doesn't reset the fleet's notion
+     * of the current epoch — see mesh_route_load. */
+    if (mesh_route_load(&mesh, flash_store_read(FLASH_SLOT_ROUTE),
+                        MESH_ROUTE_BLOB_MAX))
+        printf("counters: resumed from flash (+margin)\n");
+    save_root_counters();
+
     printf("\n=== blast-sensor base station (root) ===\n> ");
 
-    uint64_t next_beacon = now; /* beacon immediately once radio is up */
+    uint64_t next_beacon = time_us_64(); /* bench mode only */
+    uint64_t next_counter_save = time_us_64() + 600000000ull;
 
     for (;;) {
-        now = time_us_64();
+        uint64_t local = time_us_64();
+        uint64_t mnow = app_now();
 
-        rylr998_pico_pump(&radio, now);
-        rylr998_poll(&radio, now);
-        mesh_poll(&mesh, now);
+        rylr998_pico_pump(&radio, local);
+        rylr998_poll(&radio, local);
+        gps_pico_pump(&gpsp);
+        if (use_gps)
+            mesh_sched_clock_uncertainty(
+                &mesh, gps_uncertainty_us(&gpsp.gps, local));
+        mesh_poll(&mesh, mnow);
 
-        /* The library's superframe scheduler stays disabled until the
-         * fleet shares GPS time (M5), so beacon timing is application
-         * policy here: one per SUPERFRAME_US, starting when the radio
-         * is ready. */
-        if (rylr998_ready(&radio) && now >= next_beacon) {
-            next_beacon = now + SUPERFRAME_US;
-            mesh_root_beacon(&mesh, now);
-            mesh_poll(&mesh, now);
+        /* Scheduler on: the library beacons at each beacon-window
+         * start. Bench mode: application-timed beacons as in M1. */
+        if (!use_gps && rylr998_ready(&radio) && local >= next_beacon) {
+            next_beacon = local + SUPERFRAME_US;
+            mesh_root_beacon(&mesh, mnow);
+            mesh_poll(&mesh, mnow);
+        }
+
+        /* Periodic counter save (10 min — well inside the restore
+         * margin of MESH_PERSIST_SEQ_MARGIN epochs). */
+        if (local >= next_counter_save) {
+            next_counter_save = local + 600000000ull;
+            save_root_counters();
         }
 
         cli_tick();

@@ -180,6 +180,15 @@
 #define MESH_MIC_SF_TOLERANCE 1
 #endif
 
+/* ---- Route persistence (§5.3) ----
+ * A rebooted root restores its saved sequence counters advanced by this
+ * margin, guaranteeing they are ahead of anything the fleet saw between
+ * the last save and the reboot. Save at least once per this many
+ * beacon epochs (the examples save every 10 minutes). */
+#ifndef MESH_PERSIST_SEQ_MARGIN
+#define MESH_PERSIST_SEQ_MARGIN 64
+#endif
+
 /* ---- Bulk transfer (§7) ----
  * Recommended default chunk payload for FETCH originators. The chunk
  * size travels in each FETCH frame, so this is a convenience for base

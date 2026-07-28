@@ -18,6 +18,7 @@ add_library(mesh STATIC
     src/command.c
     src/telemetry.c
     src/bulk.c
+    src/persist.c
     src/mesh.c
 )
 target_include_directories(mesh PUBLIC include)

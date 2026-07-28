@@ -8,15 +8,15 @@
  * from the flash provisioning blob (`provision` on the USB CLI, M4),
  * falling back to the node_config.h bench defaults.
  *
+ * Time (M5): at boot the node waits for a GPS lock (NMEA + optional
+ * PPS, gps.[ch]); once locked, mesh time is fleet-shared absolute GPS
+ * time, the §4 superframe scheduler runs (windows, duty cycling), ARM
+ * validity windows are absolute (§6.2), and the §10.2 superframe-bound
+ * replay protection is live. Without a lock the node free-runs
+ * scheduler-off — bench mode, clearly flagged in the log. The §5.3
+ * flash route cache resumes the pre-reboot route instantly.
+ *
  * What is deliberately simplified relative to the production firmware:
- *   - Time: time_us_64() (µs since boot) instead of GPS-disciplined
- *     absolute time. The mesh only needs a monotonic local clock, but
- *     the library's superframe scheduler (§4) needs a fleet-shared
- *     timebase, so cfg.sched stays disabled here until the GPS/PPS
- *     time source lands (M5). Two consequences: ARM carries a duration
- *     instead of an absolute validity window, and the superframe-bound
- *     replay protection of §10.2 is inert (frames are authenticated,
- *     but a recording could be replayed) until that same clock exists.
  *   - Sensors: the ARMED state toggles a flag and the LED; the 1 kHz
  *     pressure pipeline, SD logging, and the full §9 state machine live
  *     in the logger application, not in this example.
@@ -35,6 +35,8 @@
 #include "pico/stdlib.h"
 #include "pico/unique_id.h"
 
+#include "flash_store.h"
+#include "gps_pico.h"
 #include "mesh/mesh.h"
 #include "node_config.h"
 #include "provision_cli.h"
@@ -43,10 +45,35 @@
 static mesh_t mesh;
 static rylr998_t radio;
 static mesh_mic_cmac_t cmac;
+static gps_pico_t gpsp;
 
 /* Runtime identity: the flash provisioning blob when present (M4), else
  * the compiled NODE_ID bench default. */
 static uint8_t node_id;
+
+/* True when GPS locked at boot: mesh time is absolute GPS time and the
+ * superframe scheduler is on (M5). False = bench free-run, M1 style. */
+static bool use_gps;
+static uint64_t mono_last;
+
+/* Route cache (§5.3): dirty on parent change, written rate-limited. */
+static bool route_dirty;
+static uint64_t route_saved_at;
+
+/* Mesh time: GPS absolute, monotonically clamped (discipline updates
+ * may nudge the offset backward a hair; the mesh requires monotonic
+ * now), or the boot-local clock when free-running. */
+static uint64_t app_now(void)
+{
+    uint64_t local = time_us_64();
+    if (!use_gps)
+        return local;
+    uint64_t t = gps_now(&gpsp.gps, local);
+    if (t <= mono_last)
+        t = mono_last + 1;
+    mono_last = t;
+    return t;
+}
 
 /* ---- application state (simplified §9) ---- */
 
@@ -76,8 +103,10 @@ static int8_t read_temp_c(void)
 static void send_telemetry(uint64_t now)
 {
     uint8_t pl[5];
-    uint16_t up_min = (uint16_t)(now / 60000000ull);
-    pl[0] = armed ? 1 : 0;               /* state */
+    uint16_t up_min = (uint16_t)(time_us_64() / 60000000ull);
+    pl[0] = (uint8_t)((armed ? 1 : 0) |  /* state: bit0 armed, */
+                      (gps_locked(&gpsp.gps, time_us_64()) ? 2
+                                                           : 0)); /* bit1 gps */
     pl[1] = (uint8_t)(read_vsys_mv() / 100); /* battery, decivolts */
     pl[2] = (uint8_t)read_temp_c();      /* °C */
     pl[3] = (uint8_t)(up_min & 0xFF);    /* uptime, minutes LE */
@@ -153,26 +182,59 @@ static uint8_t on_bulk_read(void *user, uint8_t session, uint32_t off,
 
 static uint64_t telem_due; /* STATUS pulls the next report forward */
 
+static uint64_t get_u64le(const uint8_t *p)
+{
+    uint64_t v = 0;
+    for (int i = 7; i >= 0; i--)
+        v = (v << 8) | p[i];
+    return v;
+}
+
 static bool on_command(void *user, uint16_t cmd_id,
                        const uint8_t *payload, uint8_t len)
 {
     (void)user;
-    uint64_t now = time_us_64();
+    uint64_t now = app_now();
     if (len < 1)
         return false;
 
     switch (payload[0]) {
-    case 'A': { /* ARM <duration minutes, 2B LE> */
-        if (len < 3)
-            return false;
-        uint16_t minutes = (uint16_t)(payload[1] | (payload[2] << 8));
-        /* Production firmware: validate the absolute GPS validity
-         * window here (§6) so stale/replayed ARMs are inert. */
-        armed = true;
-        armed_until = now + (uint64_t)minutes * 60000000ull;
-        printf("cmd %u: ARM for %u min\n", cmd_id, minutes);
-        return true;
-    }
+    case 'A':
+        /* ARM. Two forms (§6.2):
+         *   17 B: absolute GPS validity window <start u64, stop u64> —
+         *         the production semantics; stale or replayed ARMs are
+         *         inert because the window has passed.
+         *    3 B: duration minutes (2B LE) — bench fallback for fleets
+         *         without GPS time. */
+        if (len == 17) {
+            if (!use_gps) {
+                printf("cmd %u: ARM window but no GPS time; "
+                       "rejected\n", cmd_id);
+                return false;
+            }
+            uint64_t start = get_u64le(&payload[1]);
+            uint64_t stop = get_u64le(&payload[9]);
+            if (now < start || now >= stop) {
+                printf("cmd %u: ARM outside validity window; "
+                       "ignored (§6.2)\n", cmd_id);
+                return false;
+            }
+            armed = true;
+            armed_until = stop;
+            printf("cmd %u: ARM until +%lus (absolute window)\n",
+                   cmd_id, (unsigned long)((stop - now) / 1000000));
+            return true;
+        }
+        if (len == 3) {
+            uint16_t minutes =
+                (uint16_t)(payload[1] | (payload[2] << 8));
+            armed = true;
+            armed_until = now + (uint64_t)minutes * 60000000ull;
+            printf("cmd %u: ARM for %u min (duration form)\n", cmd_id,
+                   minutes);
+            return true;
+        }
+        return false;
     case 'D': /* DISARM */
         armed = false;
         printf("cmd %u: DISARM\n", cmd_id);
@@ -196,6 +258,7 @@ static void on_parent_change(void *user, uint8_t old_parent,
     printf("mesh: parent %u -> %u (cost %u.%02u ETX, hop %u)\n",
            old_parent, new_parent, mesh_path_cost(&mesh) >> 8,
            ((mesh_path_cost(&mesh) & 0xFF) * 100) >> 8, mesh_hops(&mesh));
+    route_dirty = true; /* flash route cache (§5.3), written from loop */
 }
 
 /* ---- radio RX -> mesh ---- */
@@ -204,7 +267,7 @@ static void on_radio_frame(void *ctx, const uint8_t *frame, size_t len,
                            int16_t rssi_dbm, int8_t snr_db)
 {
     (void)ctx;
-    mesh_rx(&mesh, frame, len, rssi_dbm, snr_db, time_us_64());
+    mesh_rx(&mesh, frame, len, rssi_dbm, snr_db, app_now());
 }
 
 /* ---- LED heartbeat: slow blink = attached, fast = searching ---- */
@@ -298,6 +361,34 @@ int main(void)
     /* MIC: real AES-128-CMAC under the deployment key. */
     mesh_mic_cmac_init(&cmac, prov.key);
 
+    /* GPS (M5): wait for a first lock so mesh time is fleet-shared
+     * absolute time and the superframe scheduler (with the §10.2
+     * replay-protected MIC) can run. No lock within the window —
+     * no module wired, or on a bench indoors — falls back to
+     * free-running with the scheduler off. */
+    gps_pico_init(&gpsp);
+    printf("gps: waiting up to %us for lock (LED double-blinks while "
+           "waiting)...\n", (unsigned)(GPS_WAIT_US / 1000000));
+    uint64_t gps_deadline = time_us_64() + GPS_WAIT_US;
+    while (time_us_64() < gps_deadline) {
+        uint64_t t = time_us_64();
+        gps_pico_pump(&gpsp);
+        rylr998_pico_pump(&radio, t);
+        rylr998_poll(&radio, t);
+        gpio_put(PICO_DEFAULT_LED_PIN, ((t / 100000) % 10) < 2);
+        if (gps_locked(&gpsp.gps, t)) {
+            use_gps = true;
+            break;
+        }
+        sleep_ms(2);
+    }
+    if (use_gps)
+        printf("gps: locked%s — scheduler on, replay protection "
+               "active\n", gpsp.gps.pps_ever ? " (PPS)" : " (no PPS)");
+    else
+        printf("gps: no lock — free-running, scheduler off (bench "
+               "mode; replay protection dormant)\n");
+
     /* RNG seed must differ per node: mix the flash unique ID. */
     pico_unique_board_id_t uid;
     pico_get_unique_board_id(&uid);
@@ -317,24 +408,48 @@ int main(void)
         },
         .rng_seed = seed ? seed : 1,
     };
+    if (use_gps) {
+        cfg.sched.enabled = true;
+        cfg.sched.mode = mesh_sched_mode_active();
+        cfg.sched.mode.period_us = SCHED_PERIOD_US;
+        cfg.sched.mode.bulk_win_us = SCHED_BULK_WIN_US;
+    }
     if (!mesh_init(&mesh, &cfg)) {
         printf("mesh_init failed (bad config)\n");
         for (;;)
             tight_loop_contents();
     }
 
-    telem_due = now + TELEM_PERIOD_US;
+    /* Route cache (§5.3): resume the pre-reboot route immediately if a
+     * valid snapshot is stored; repaired lazily from live beacons. */
+    if (mesh_route_load(&mesh, flash_store_read(FLASH_SLOT_ROUTE),
+                        MESH_ROUTE_BLOB_MAX))
+        printf("route: resumed from flash (parent %u)\n",
+               mesh_parent(&mesh));
+    route_dirty = false; /* what's stored is what we just loaded */
+
+    telem_due = app_now() + TELEM_PERIOD_US;
     bool radio_was_ready = false;
+    uint64_t unc_next = 0;
 
     for (;;) {
-        now = time_us_64();
+        uint64_t local = time_us_64();
+        uint64_t mnow = app_now();
 
         /* The whole stack is pumped from this single loop: UART bytes
-         * into the AT driver (which delivers frames into mesh_rx), then
-         * driver timeouts, then mesh scheduling. */
-        rylr998_pico_pump(&radio, now);
-        rylr998_poll(&radio, now);
-        mesh_poll(&mesh, now);
+         * into the AT driver (which delivers frames into mesh_rx) and
+         * the GPS parser, then driver timeouts, then mesh scheduling.
+         * The radio driver runs on the local clock; the mesh runs on
+         * mesh time (GPS absolute when locked). */
+        rylr998_pico_pump(&radio, local);
+        rylr998_poll(&radio, local);
+        gps_pico_pump(&gpsp);
+        if (use_gps && local >= unc_next) {
+            unc_next = local + 1000000;
+            mesh_sched_clock_uncertainty(
+                &mesh, gps_uncertainty_us(&gpsp.gps, local));
+        }
+        mesh_poll(&mesh, mnow);
 
         if (!radio_was_ready && rylr998_ready(&radio)) {
             radio_was_ready = true;
@@ -342,21 +457,35 @@ int main(void)
                    (double)RADIO_BAND_HZ / 1e6, RADIO_SF);
         }
 
-        if (armed && now >= armed_until) {
+        if (armed && mnow >= armed_until) {
             armed = false;
             printf("arm window elapsed; disarmed\n");
         }
 
-        if (now >= telem_due) {
-            telem_due = now + TELEM_PERIOD_US;
-            send_telemetry(now);
-            mesh_poll(&mesh, now); /* flush the enqueued report */
+        if (mnow >= telem_due) {
+            telem_due = mnow + TELEM_PERIOD_US;
+            send_telemetry(mnow);
+            mesh_poll(&mesh, mnow); /* flush the enqueued report */
+        }
+
+        /* Route cache write: rare (parent changes only), rate-limited,
+         * and — when scheduled — deferred into the sleep segment so
+         * the ~50 ms interrupts-off flash write can't eat a frame. */
+        if (route_dirty && local - route_saved_at > 60000000ull &&
+            (!use_gps || !mesh_sched_listening(&mesh))) {
+            uint8_t blob[MESH_ROUTE_BLOB_MAX];
+            size_t bl = mesh_route_save(&mesh, blob, sizeof(blob));
+            if (bl > 0)
+                flash_store_write(FLASH_SLOT_ROUTE, blob, bl);
+            route_dirty = false;
+            route_saved_at = local;
         }
 
         cli_tick();
-        led_tick(now);
-        /* Busy loop: with the scheduler enabled (M5, once GPS lands)
-         * this becomes a sleep until mesh_poll's returned deadline. */
+        led_tick(local);
+        /* The AT-driver needs sub-ms servicing while frames stream, so
+         * this stays a paced busy loop; deep MCU sleep in the schedule
+         * gap is logger-application territory (§9). */
         sleep_us(500);
     }
 }

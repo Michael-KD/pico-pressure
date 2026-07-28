@@ -130,6 +130,8 @@ If a node loses GPS lock, it free-runs on its crystal (drift of a few ppm) and w
 - **Telemetry micro-slots** are ID-ordered within the telemetry window (default 1 s slots) and apply to a node's *own* reports; relayed reports flow immediately so a deep node's telemetry is not delayed a superframe per hop.
 - **One pending mode switch at a time.** The SLEEP/WAKE command carries (mode, effective GPS time); nodes that miss it and stay in the old mode still overlap the new schedule's beacon window often enough to be recovered by re-floods — but the base should treat mode switches like ARM: verify the ACK checklist.
 
+**Time source (M5).** The example firmware implements the GPS discipline this section assumes: NMEA RMC labels the receiver's 1PPS edge, yielding the local-clock→UTC offset (±1 ms fleet alignment with PPS wired, ±400 ms from sentence timing without); between fixes the node free-runs on the offset and reports `drift_ppm × time-since-fix` via `mesh_sched_clock_uncertainty()`, which is precisely this section's widened-listen degradation. A node with no lock at boot runs scheduler-off (bench mode). Mesh time is Unix-epoch microseconds; any fleet-shared absolute origin works, since superframe alignment only needs agreement.
+
 ---
 
 ## 5. Neighbor Discovery and Collection-Tree Formation
@@ -159,6 +161,12 @@ where ETX of a link is estimated from beacon reception ratio over a sliding wind
 - The full neighbor table and chosen parent are persisted to flash. On boot, a node resumes its last-known route immediately and repairs it lazily from subsequent beacons.
 - The base builds a global topology map from telemetry (each status report includes the node's parent and top-3 neighbors). Operators can view the tree, spot single points of failure, and pre-plan relay node placement.
 - Because positions are fixed, beacon frequency can be low in standby; the tree only needs to react to node death, not motion.
+
+**Implementation notes (M5).** The persistence shipped as a library snapshot API (`mesh_route_save`/`load` — the app owns the flash) with two roles:
+
+- **Node blob:** parent, path cost, each neighbor's smoothed ETX, and the beacon-epoch position. Restored estimators restart seeded with the saved EWMA (the §5.2 reappearance rule), and because `net_epoch`/`last_beacon_seq` are saved too, the §5.4 staleness rule keeps working across the outage: a node down longer than M superframes finds its restored route poisoned by the first fresh beacon and rejoins from scratch. A quick reboot (brown-out, watchdog) resumes routing instantly — telemetry flows before the first post-reboot beacon.
+- **Root blob:** the beacon/flood/command counters, restored advanced by a safety margin (§11). This fixes a defect the simulator demonstrated: a rebooted base restarting at beacon seq 0 looks *older* than the fleet's held epoch under wrap-safe comparison, every beacon is discarded as a stale reordered copy, and the tree freezes indefinitely. With the margin the fleet sees a forward epoch jump and re-forms in a couple of superframes; command IDs never revisit dedup'd values.
+- Blobs are CRC-guarded and bound to (node ID, network ID), so corrupt flash or a re-provisioned identity reads as "no cache".
 
 ### 5.4 Loop Prevention and Route Repair
 
@@ -307,7 +315,7 @@ Even on a private test range, the ARM path warrants protection against accidenta
   - **Sealed at transmit time, not enqueue time.** Frames are built when queued but can transmit much later — telemetry waits for its micro-slot, window-gated frames defer to the next superframe, and per-hop retries can cross a boundary. The MIC trailer is therefore recomputed at the moment of transmission (every send, including each retry), so what goes on air always carries the index the receiver will check. Without this, a deferred frame could be several superframes stale on arrival and fail a ±1 check legitimately.
   - **Tolerance is a tunable** (§11, default ±1). It bounds the replay window: an attacker's recording is useful only within the tolerance of its capture, i.e. seconds to minutes depending on mode.
   - **Cost.** The accept path is one MIC computation (the receiver's own index is tried first); a frame that fails all candidates costs 1 + 2 × tolerance. Rate-limited by air time, as with the 2⁻³² forgery bound.
-  - **Requires the §4 scheduler.** Without a shared superframe index there is nothing to bind to, so scheduler-off deployments use a constant index — identical on-air bytes, replay protection inactive. This makes GPS time (M5) a prerequisite for replay protection in the field, and it is why the example firmware, which free-runs on its boot clock, does not yet benefit. Deployments that need replay protection without a shared clock would need the persisted-counter alternative.
+  - **Requires the §4 scheduler.** Without a shared superframe index there is nothing to bind to, so scheduler-off deployments use a constant index — identical on-air bytes, replay protection inactive. GPS time is therefore the prerequisite, and since M5 the example firmware provides it: a node that achieves GPS lock at boot (NMEA + optional PPS) runs the scheduler on absolute time and gets the binding live; a node that cannot lock free-runs in bench mode with the protection dormant, clearly flagged in its logs. Deployments that need replay protection without any shared clock would need the persisted-counter alternative.
   - Application-layer mitigations remain useful in depth: ARM validity windows (§6.2) keep stale ARMs inert regardless, and the executed-command cache still suppresses duplicate execution within its wrap window.
 - The RYLR998's `AT+CPIN` module encryption is **not** used as a security control (unspecified algorithm); §10.2 authentication happens above the radio.
 - Payload encryption (AES-CTR) is optional and cheap on the Pico if data confidentiality is desired; authentication is the non-negotiable part.
@@ -334,6 +342,7 @@ Even on a private test range, the ARM path warrants protection against accidenta
 | Executed-command cache | 32 command IDs | Exactly-once execution across re-floods (§6.1). |
 | Per-hop dedup cache | 16 (src, type, seq) | Covers the lost-HOP-ACK retransmit case (§6.4). |
 | Stale-route timeout M | 4 superframes | Fast poisoning of dead paths. |
+| Root counter restore margin | 64 seqs | Rebooted base restarts strictly ahead of the fleet's held epoch (§5.3 M5); save at least once per margin's worth of epochs. |
 | Pre-trigger ring buffer | 10 s | Captures onset before threshold crossing. |
 
 ---

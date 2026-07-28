@@ -32,12 +32,34 @@
         0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,                 \
     }
 
-/* Superframe period — how often the base beacons (active mode; the
- * standby/active mode machinery is milestone M2). */
+/* Beacon period for the free-running fallback (no GPS lock at boot:
+ * scheduler off, application-timed beacons, M1 style). */
 #define SUPERFRAME_US (10ull * 1000000)
 
 /* Field node: unsolicited telemetry period. */
 #define TELEM_PERIOD_US (60ull * 1000000)
+
+/* ---- GPS time source (M5) ----
+ * Any NMEA receiver (u-blox NEO-6M/M8N class) on uart0; 1PPS on a GPIO
+ * gives ±1 ms fleet alignment instead of ±400 ms (set -1 if unwired).
+ * A device that gets no lock within GPS_WAIT_US free-runs with the
+ * scheduler off — fine on the bench, flagged in the logs. */
+#define GPS_UART    uart0
+#define GPS_BAUD    9600
+#define GPS_TX_PIN  0 /* Pico TX -> GPS RX (reserved for rx config) */
+#define GPS_RX_PIN  1 /* GPS TX -> Pico RX */
+#define GPS_PPS_PIN 2 /* 1PPS output; -1 = not wired */
+#define GPS_WAIT_US (90ull * 1000000)
+
+/* ---- superframe mode once GPS time is available ----
+ * The §4 active window layout (beacon 10 s / cmd 20 s / telem 30 s) on
+ * a 90 s period with a bulk window so bench retrieval works while
+ * scheduled, and a sleep tail that proves duty cycling. MUST be
+ * identical on every device: superframe alignment and the replay MIC
+ * both bind to it. (M6's commanded retrieval mode supersedes the
+ * fixed bulk window for real deployments.) */
+#define SCHED_PERIOD_US   (90ull * 1000000)
+#define SCHED_BULK_WIN_US (20u * 1000000)
 
 /* ---- RYLR998 module settings (same on every device) ---- */
 

@@ -76,6 +76,11 @@ design doc's collection-tree architecture:
   session — resumption is base-side state, so a node reboot costs only
   the chunk in flight. Data comes from (and lands in) application
   callbacks, so the SD card and event index stay out of the library.
+- **Route persistence** (§5.3): snapshot API for flash caching — a
+  rebooted node resumes its last-known route instantly (telemetry flows
+  before the first post-reboot beacon) with §5.4 staleness intact, and
+  a rebooted base restores its sequence counters ahead of the fleet's
+  held epoch instead of wedging the network at seq 0.
 
 The same library serves both roles: node ID 0 is the root (base-station
 gateway); IDs 1–254 are field nodes.
@@ -120,6 +125,7 @@ src/
   command.c                   execution + ACK, per-hop-reliable tree unicast
   telemetry.c                 status reports with routing context (§5.3)
   bulk.c                      FETCH sessions, chunk streaming, CRC16 (§7.3)
+  persist.c                   route/counter snapshots for flash caching (§5.3)
   txqueue.c                   due-time TX queue: backoffs, retries, exhaustion
   sched.c                     superframe math, window gating, duty cycling
   mic_cmac.c                  AES-128-CMAC MIC (RFC 4493), portable software AES
@@ -133,6 +139,8 @@ examples/                     standalone pico-sdk project (see below)
   provision.[ch]              flash provisioning blob codec (ID + net + key)
   provision_cli.c             `provision` CLI command (both firmwares)
   flash_store.[ch]            fixed-slot blob store in the Pico's flash
+  gps.[ch]                    GPS time source: NMEA + PPS clock discipline
+  gps_pico.[ch]               UART/PPS-IRQ glue for the GPS receiver
   rylr998_pico.[ch]           Pico UART/IRQ glue for the radio driver
   radios/RYLR998/             portable AT-protocol driver core + datasheets
 tests/
@@ -151,7 +159,7 @@ Build and test on any Linux host (WSL Ubuntu works; needs `cmake`,
 ```sh
 cmake -B build -G Ninja
 cmake --build build
-ctest --test-dir build            # 10 suites, all green
+ctest --test-dir build            # 12 suites, all green
 ./build/tests/mesh_demo           # watch a 10-node fleet form, flood, heal
 ```
 
@@ -183,7 +191,11 @@ same key + netid fleet-wide, unique id per device):
 
 Unprovisioned devices fall back to the compiled `node_config.h` bench
 identity. Wire each RYLR998 to 3V3/GND, GP4→RXD, GP5←TXD (and GP6→NRST,
-optional). The base station gives you a CLI on USB serial:
+optional). For field operation add a GPS receiver: GPS TX→GP1, and
+PPS→GP2 if your module exposes it (worth it — ±1 ms fleet alignment vs
+±400 ms). A device that locks GPS at boot runs the superframe scheduler
+on absolute time; one that doesn't free-runs in bench mode and says so.
+The base station gives you a CLI on USB serial:
 
 ```
 > arm 30        flood ARM (30 min) — ACKs print as they arrive
@@ -283,8 +295,12 @@ base and only a cursor at the node.
   streaming with single-in-flight discipline, re-FETCH session
   replacement, EOF short reads, root-side CRC gate), the RYLR998
   driver core (config sequence, hex round-trip, +RCV parsing, busy
-  gating, module-reset recovery), and the provisioning blob codec
-  (round-trip, per-byte corruption rejection, key-hex parsing).
+  gating, module-reset recovery), the provisioning blob codec
+  (round-trip, per-byte corruption rejection, key-hex parsing), the
+  route-persistence snapshots (round-trip, per-byte corruption and
+  identity rejection, root counter margins), and the GPS time source
+  (calendar known-answers, PPS and sentence-timing discipline, checksum
+  rejection, free-run uncertainty growth).
 - **Scenario tests** run whole fleets on the simulator: 10-node tree
   formation, deterministic relay-death self-healing with hysteresis-gated
   re-optimization, a 20 %-loss 6-node line flood with exactly-once
@@ -300,6 +316,12 @@ base and only a cursor at the node.
   full production stack (CMAC MIC + scheduler + bulk window) retrieving
   data with zero MIC drops, then rejecting a frame captured off the air
   and replayed three superframes later.
+- **Reboot scenarios (§5.3):** a rebooted node restores its flash route
+  cache and delivers telemetry before hearing a single beacon (and a
+  node down past the staleness threshold correctly re-attaches from
+  scratch instead of trusting the stale cache); a rebooted base first
+  demonstrates the seq-0 wedge without persistence, then recovers the
+  fleet with restored counters and keeps commands exactly-once.
 - The protocol was additionally validated with a 25-seed randomized sweep
   of the healing and lossy-flood scenarios (50 runs, 0 failures); the
   committed tests use fixed seeds and are fully deterministic.
@@ -350,18 +372,17 @@ gap (§10.2).
 | **M2: Superframe scheduler** | GPS-time-aligned windows (beacon/command/telemetry/bulk), duty-cycled listening, standby/active modes (§4) | **done** |
 | **M3: Bulk transfer** | chunked FETCH sessions with single-chunk tree unicast, per-chunk CRC, base-driven resumption by byte range (§7) **done**; store-and-forward burst pipelining + selective-ACK bitmaps deferred | **done (first cut)** |
 | **M4: Link security** | AES-128-CMAC MIC (RFC 4493 KAT-verified); superframe-bound replay protection (§10.2, needs GPS time to be active in the field); flash key-provisioning workflow (`provision` CLI, one UF2 per fleet) | **done** |
-| **M5: Pico port** | RYLR998 driver + field-node/base examples **done** (cross-built with pico-sdk); GPS/PPS time source and flash route cache (§5.3) remain | **partial** |
+| **M5: Pico port** | RYLR998 driver + field-node/base examples; GPS/PPS time source (NMEA discipline, scheduler live in the field, absolute ARM windows); flash route cache + root counter persistence (§5.3) | **done** (software; real-air field validation outstanding) |
 | **M6: Base-station tooling** | topology map, retrieval scheduler, fleet checklist/retry policy on the base server (the base_station example CLI is the embryo) | planned |
 
 ## Current caveats (read before fielding)
 
-- **Replay protection is implemented but dormant without GPS.** The
-  superframe-bound MIC closes the replay gap (§10.2) — but only when the
-  scheduler is enabled, since it binds the *shared* superframe index.
-  The example firmware free-runs on its boot clock, so today it gets
-  authentication without replay protection; both the scheduler and this
-  binding go live with the GPS/PPS time source (M5). ARM validity
-  windows remain the application-layer backstop meanwhile.
+- **Replay protection needs GPS lock.** The superframe-bound MIC
+  (§10.2) binds the *shared* superframe index, so it is live exactly
+  when the scheduler is: nodes that lock GPS at boot get it; a node
+  that can't lock free-runs in bench mode with authentication only,
+  and says so in its log. Absolute ARM validity windows (§6.2) are the
+  application backstop and are also GPS-gated.
 - **The key lives in plaintext flash.** Provisioning (M4) keeps the key
   out of the firmware image, but the RP2040 has no secure storage or
   readout protection — physical possession of a node yields the key, so
@@ -369,15 +390,16 @@ gap (§10.2).
   inject ARM commands. The null MIC still exists for the simulator —
   never field it. An unprovisioned device falls back to the compiled
   `node_config.h` bench key and says so at boot.
-- **The scheduler needs a shared clock.** Superframe alignment assumes
-  every node's `now_us` is the same GPS-disciplined timebase. The
-  example firmware clocks from `time_us_64()` (µs since boot,
-  per-board), so it keeps the scheduler disabled — and ARM validity
-  windows unenforced — until the GPS/PPS time source lands (M5). Nodes
-  that lose GPS lock should report drift via
-  `mesh_sched_clock_uncertainty()`.
-- Neighbor/route state is RAM-only; the §5.3 flash cache for instant
-  post-reboot route resumption comes with the Pico port (M5).
+- **The whole fleet needs GPS for scheduled operation.** Superframe
+  alignment assumes every node's `now_us` is the same GPS-disciplined
+  timebase; one node without lock degrades itself (widened listening
+  via `mesh_sched_clock_uncertainty()`), but a *mixed* fleet where some
+  nodes never locked (scheduler off) and some did (scheduler on) won't
+  interoperate under the replay-bound MIC. Bring the fleet up together.
+  Wire PPS: it is the difference between ±1 ms and ±400 ms alignment.
+- **Not yet validated on real air.** Everything above is proven on the
+  host simulator and bench hardware; range, collisions, and SF margins
+  in real desert terrain are the remaining M5 field work.
 - **Bulk retrieval is correct but unpipelined.** One chunk is in flight
   per node, so throughput is round-trip-bound rather than air-time-bound
   — fine at the design's minutes-to-hours latency budget, and the first
@@ -416,13 +438,8 @@ parentheses.
 
 ### Todo
 
-- GPS/PPS time source for the example firmware; enable the scheduler,
-  absolute ARM validity windows, and replay protection in the field
-  (M5 remainder — replay protection is dormant until this lands)
 - Bulk-window scheduling policy: who opens the retrieval window and when
   (§7.4 / §13 Q8)
-- Flash cache of neighbor table + parent for instant post-reboot routing
-  (M5 remainder, §5.3)
 - Base-station tooling: topology map, retrieval scheduler, fleet
   checklist/retry policy on a real computer (M6)
 - Field validation on real air: range, collisions, SF margins (M5)
@@ -431,10 +448,14 @@ parentheses.
 
 ### In progress
 
-- (nothing — M4 landed; M5 GPS remainder is next)
+- (nothing — M5 landed; M6 base-station tooling is next)
 
 ### Done
 
+- M5 GPS time source: NMEA+PPS clock discipline, scheduler live in the
+  field, absolute ARM validity windows, replay protection active
+- M5 route persistence: instant post-reboot routing (§5.3) + root
+  counter persistence (fixes the base-reboot seq-0 wedge)
 - M4 key provisioning: flash blob + `provision` CLI on both firmwares,
   one generic UF2 per fleet, PC-generated keys (§13 Q5)
 - M1 core mesh: codec, ETX collection tree, command flooding + ACKs,

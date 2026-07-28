@@ -56,9 +56,21 @@ target_link_libraries(provision PUBLIC
     hardware_watchdog
 )
 
+# GPS time source: portable NMEA/discipline core + UART/PPS glue (M5).
+add_library(gpsdrv STATIC
+    gps.c
+    gps_pico.c
+)
+target_include_directories(gpsdrv PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(gpsdrv PUBLIC
+    pico_stdlib
+    hardware_uart
+    hardware_irq
+)
+
 function(mesh_example name)
     add_executable(${name} ${ARGN})
-    target_link_libraries(${name} PRIVATE mesh rylr998 provision
+    target_link_libraries(${name} PRIVATE mesh rylr998 provision gpsdrv
         pico_stdlib)
     target_compile_options(${name} PRIVATE -Wall -Wextra)
     # Logs and (for the base station) the CLI go over USB serial.

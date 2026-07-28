@@ -367,6 +367,35 @@ bool mesh_root_fetch(mesh_t *m, uint8_t target, uint8_t session,
                      uint32_t req_length, uint8_t chunk_size,
                      uint64_t now_us);
 
+/* ---- Route persistence (§5.3) ----
+ * The application owns the storage (flash on the Pico). Save produces a
+ * self-checking blob; load must be called immediately after mesh_init,
+ * before any received traffic.
+ *
+ * Field node: saves parent + path cost + neighbor ETX estimates + the
+ * beacon-epoch position, so a rebooted node resumes its last route
+ * instantly and repairs it lazily from subsequent beacons — the §5.4
+ * staleness rule still poisons a route that aged out during the outage.
+ * Save on parent change (rate-limited; flash wear is the app's budget).
+ *
+ * Root: saves the beacon/flood/command counters; load restores them
+ * advanced by MESH_PERSIST_SEQ_MARGIN so a rebooted base's sequence
+ * numbers stay strictly ahead of everything the fleet has seen (a base
+ * restarting at seq 0 would look *older* than the fleet's held state
+ * and be ignored). Save periodically, well inside the margin. */
+
+/* Worst-case blob size (node role with a full neighbor table). */
+#define MESH_ROUTE_BLOB_MAX (8 + 8 + MESH_MAX_NEIGHBORS * 8 + 2)
+
+/* Serialize into buf (>= MESH_ROUTE_BLOB_MAX); returns bytes written,
+ * 0 on error. */
+size_t mesh_route_save(const mesh_t *m, uint8_t *buf, size_t max);
+
+/* Restore from a saved blob. Returns false (leaving the mesh unchanged)
+ * on CRC/version mismatch, identity mismatch (node re-provisioned),
+ * role mismatch, or a mesh that has already heard traffic. */
+bool mesh_route_load(mesh_t *m, const uint8_t *buf, size_t len);
+
 /* ---- Introspection ---- */
 
 uint8_t  mesh_parent(const mesh_t *m);     /* MESH_ID_NONE if unattached */

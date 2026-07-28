@@ -11,14 +11,17 @@ While you work, the base prints events as they arrive:
 
 ```
 ACK: node 3 executed cmd 17          <- a command ACK came up the tree
-TELEM: node 2 (parent 1, standby, 4.9V, 31C)
+TELEM: node 2 (parent 1, standby, gps, 4.9V, 31C)
 ```
+
+(`gps`/`NO-GPS` is each node's own lock state; a `NO-GPS` node is
+free-running without the superframe schedule or replay protection.)
 
 ## Commands
 
 | Command | What it does |
 |---|---|
-| `arm [minutes]` | Floods an ARM command to the whole fleet. Nodes arm for the given duration (default **60** minutes) and then disarm themselves. Watch the ACK lines to see who got it. |
+| `arm [minutes]` | Floods an ARM command to the whole fleet (default **60** minutes). With GPS lock this carries an **absolute validity window** (design doc §6.2) — stale or replayed copies are inert; nodes without GPS time reject it. On a GPS-less bench it falls back to a duration. Watch the ACK lines to see who got it. |
 | `disarm` | Floods DISARM. Armed nodes return to standby immediately. |
 | `status` | Floods STATUS. Every node answers with a telemetry report (state, battery, temperature) within a second or two — the quickest way to roll-call the fleet. |
 | `resend` | Re-floods the **last** command with the *same* command ID. Nodes that already executed it just re-ACK (they never execute twice); nodes that missed it execute now. Use this to chase stragglers until the checklist is complete. |
@@ -119,7 +122,7 @@ two example firmwares is one ASCII byte + arguments:
 
 | Opcode | Payload | Field-node behavior ([main.c](main.c)) |
 |---|---|---|
-| `'A'` | 2-byte minutes, little-endian | Arm for that duration. (Production: absolute GPS validity window, design doc §6.) |
+| `'A'` | 17 B: `start`,`stop` GPS µs (u64 LE ×2) — or 3 B: minutes (u16 LE) bench fallback | Arm inside the absolute validity window (§6.2); the duration form only exists for GPS-less benches. |
 | `'D'` | — | Disarm. |
 | `'S'` | — | Send telemetry within ~1 s. |
 | other | — | Rejected — **no ACK**, so the base's checklist shows the gap. |

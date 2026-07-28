@@ -102,6 +102,10 @@ void sim_set_node_mic(sim_net_t *s, uint8_t id, const mesh_mic_ops_t *mic);
 void sim_link(sim_net_t *s, uint8_t a, uint8_t b, uint8_t loss_pct);
 void sim_kill(sim_net_t *s, uint8_t id);
 void sim_revive(sim_net_t *s, uint8_t id);
+/* Power-cycle one node: its mesh_t re-initializes fresh (same identity,
+ * MIC, callbacks) while the virtual clock keeps running. Pair with
+ * mesh_route_save/load to model the §5.3 flash route cache. */
+void sim_reboot(sim_net_t *s, uint8_t id);
 
 /* Advance virtual time, delivering frames and polling every node. */
 void sim_run(sim_net_t *s, uint64_t dur_us);
